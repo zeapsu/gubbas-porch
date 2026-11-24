@@ -60,7 +60,7 @@ jobs:
         run: npm run test:e2e
 
       - name: Setup Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Build production bundle (BASE_PATH=/gubbas-porch/)
         env:
