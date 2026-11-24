@@ -83,7 +83,7 @@ The `review-gate` job in [.github/workflows/ci.yml](./.github/workflows/ci.yml) 
 2. On pull requests, verifies the PR body includes **Risk Tier**, **Testing**, and **How to Revert** (matching `.github/pull_request_template.md`).
 3. Computes the minimum required risk tier from the PR's changed files and fails if the PR under-declares its tier.
 4. Runs deterministic static security hygiene checks (forbids `eval`/`new Function`/`innerHTML`, checks secret patterns, checks workflow `permissions:` and `${{ github.event.* }}` interpolation).
-5. On repositories with `ANTHROPIC_API_KEY` configured, runs an automated AI diff review grounded in `REVIEW.md` and fails on any `Important` finding.
+5. Medium and High risk changes additionally require a fresh-context, cross-model read-only review against this document prior to merge (logged in PR summary or review comments), with all `Important` findings resolved.
 
 ## 9. Feedback Loop (Incidents Become Evals)
 

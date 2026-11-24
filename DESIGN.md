@@ -871,7 +871,7 @@ With `?test=1`, or in a dev build, `window.__rakeMe` exposes `sandHash()`, `stat
 | Flow | Zero displacement at and beyond 3R; with no stones, flow on and off give identical grids |
 | Cel step | `toneFor` is in `0 … n−1`, non-decreasing in intensity for a fixed Bayer value, and equal to the value the generated GLSL constants produce for a table of inputs |
 | Ramps | Every ramp's slots exist; multi-slot ramps are non-decreasing in luminance in all four moods |
-| Camera | `stepCamera` converges to the goal without overshoot; all presets are within the orbit limits; in every preset the bed's four corners project inside a 364×205 view |
+| Camera | `stepCamera` converges to the goal without overshoot; all presets are within the orbit limits; in Cozy and Top-Down the bed's four corners project inside a 364×205 view (and in all three after `framedRig`) |
 | Undo | For any action sequence, `undo` restores the previous grid byte-for-byte and `redo` reapplies it; the stack never exceeds 32 |
 | Sweep | The front is monotonic in time; cells ahead of it are untouched; at the end every non-rock cell is level and unraked |
 | Serialisation | `decode(encode(s))` equals `s` for arbitrary states; output is at most 64 KB; random and truncated input never throws and yields a fresh garden |

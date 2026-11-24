@@ -1,0 +1,91 @@
+name: Deploy to GitHub Pages
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build & Verify Static Bundle
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_branch == 'main' &&
+        github.event.workflow_run.head_repository.full_name == github.repository
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout verified commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Enforce REVIEW.md gate
+        run: node .github/scripts/review-gate.mjs
+
+      - name: Verify types, lint, assets & unit tests
+        run: npm run typecheck && npm run lint && npm run verify:assets && npm run test:unit
+
+      - name: Install Chromium for Playwright (manual dispatch gate)
+        if: github.event_name == 'workflow_dispatch'
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright E2E gate (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          BASE_PATH: /rake-me/
+        run: npm run test:e2e
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Build production bundle (BASE_PATH=/rake-me/)
+        env:
+          BASE_PATH: /rake-me/
+        run: npm run build
+
+      - name: Check bundle budgets
+        run: npm run check:bundle
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    name: Deploy to GitHub Pages
+    runs-on: ubuntu-latest
+    needs: [build]
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

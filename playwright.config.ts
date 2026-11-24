@@ -24,7 +24,7 @@ export default defineConfig({
     },
   },
   webServer: {
-    command: "BASE_PATH=/rake-me/ npm run build && npm run preview",
+    command: "BASE_PATH=/rake-me/ npm run build && BASE_PATH=/rake-me/ npm run preview",
     url: "http://127.0.0.1:4173/rake-me/",
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,

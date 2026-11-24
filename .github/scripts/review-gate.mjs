@@ -42,7 +42,7 @@ function listTrackedFiles() {
 }
 
 function getChangedFiles(baseRef) {
-  if (!baseRef) return [];
+  if (!baseRef) return null;
   try {
     const out = execFileSync(
       "git",
@@ -51,7 +51,7 @@ function getChangedFiles(baseRef) {
     );
     return out.split("\n").map((s) => s.trim()).filter(Boolean);
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -180,10 +180,16 @@ function classifyPath(rel) {
   if (
     rel.startsWith(".github/workflows/") ||
     rel.startsWith(".github/scripts/") ||
+    rel === ".github/dependabot.yml" ||
     rel === "REVIEW.md" ||
     rel === "AGENTS.md" ||
     rel === "vite.config.ts" ||
-    rel === "package.json"
+    rel === "eslint.config.js" ||
+    rel === "tsconfig.json" ||
+    rel === "vitest.config.ts" ||
+    rel === "playwright.config.ts" ||
+    rel === "package.json" ||
+    rel === "package-lock.json"
   ) {
     return "High";
   }
@@ -209,10 +215,15 @@ if (eventName === "pull_request" && eventPath && fs.existsSync(eventPath)) {
   const baseSha = pr && pr.base && pr.base.sha;
   const changed = getChangedFiles(baseSha);
 
-  for (const rel of changed) {
-    const t = classifyPath(rel);
-    if (TIER_ORDER[t] > TIER_ORDER[computedTier]) {
-      computedTier = t;
+  if (changed === null) {
+    computedTier = "High";
+    errors.push("git diff failed for PR base SHA; failing closed at High risk tier");
+  } else {
+    for (const rel of changed) {
+      const t = classifyPath(rel);
+      if (TIER_ORDER[t] > TIER_ORDER[computedTier]) {
+        computedTier = t;
+      }
     }
   }
 
