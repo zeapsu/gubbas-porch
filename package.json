@@ -27,7 +27,7 @@
   "devDependencies": {
     "@eslint/js": "^9.24.0",
     "@playwright/test": "^1.51.1",
-    "@types/node": "^22.14.0",
+    "@types/node": "^26.6.6",
     "@types/three": "^0.175.0",
     "eslint": "^9.24.0",
     "fast-check": "^3.23.2",
