@@ -73,8 +73,10 @@ import {
   TOUCH_OVERLAY_SLOP_PX,
   TOUCH_PICK_RADIUS_PX,
   TOUCH_SLOP_PX,
+  VISUAL_VIEWPORT_MAX_SCALE,
   adjustMix,
   bindKeyboard,
+  boundedViewportSide,
   createAutoRunner,
   createDomMirror,
   createHaptics,
@@ -215,6 +217,9 @@ const MOUSE_DRAG_SLOP_PX = 3;
 const TOUCH_SEARCH_MAX_FB = 8;
 const TOUCH_SEARCH_OFFSETS = discOffsets(TOUCH_SEARCH_MAX_FB);
 const STATIONARY_FOLEY_TIMEOUT_MS = 80;
+/** After a resume or a turn of the screen the canvas is fitted again this long later, and once more after that. */
+const RESUME_SETTLE_SOON_MS = 150;
+const RESUME_SETTLE_LATE_MS = 400;
 
 function readStorage(key: string): string | null {
   try {
@@ -307,8 +312,10 @@ async function boot(): Promise<void> {
     }
     if (rotatePrompt) {
       rotatePrompt.hidden = !blocked;
+      // preventScroll: moving focus must never slide the page under the stage (iOS scrolls a focused element
+      // into view even on a page with nothing to scroll)
       if (blocked) {
-        rotatePrompt.focus();
+        rotatePrompt.focus({ preventScroll: true });
       } else {
         const target =
           rotatePrevFocus && rotatePrevFocus.isConnected && !rotatePrevFocus.closest("[inert]")
@@ -317,7 +324,7 @@ async function boot(): Promise<void> {
               ? titleCard
               : canvas;
         rotatePrevFocus = null;
-        if (target instanceof HTMLElement) target.focus();
+        if (target instanceof HTMLElement) target.focus({ preventScroll: true });
       }
     }
   }
@@ -616,10 +623,21 @@ async function boot(): Promise<void> {
     if (saveTimer !== null) clearTimeout(saveTimer);
     saveTimer = setTimeout(flushSave, SAVE_DEBOUNCE_MS);
   }
-  window.addEventListener("visibilitychange", () => {
-    if (document.hidden) flushSave();
+  // Leaving the foreground ends whatever a hand was doing first, so a stroke in progress is in what gets saved
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      clearActiveInteractions();
+      flushSave();
+    } else {
+      resumeViewport();
+    }
   });
-  window.addEventListener("pagehide", flushSave);
+  window.addEventListener("pagehide", () => {
+    clearActiveInteractions();
+    flushSave();
+  });
+  // Control Center, the app switcher or a system sheet takes the fingers away without lifting them for the page
+  window.addEventListener("blur", clearActiveInteractions);
 
   function markDirty(r: SandRect | null): void {
     if (!r || r.w <= 0 || r.h <= 0) return;
@@ -700,30 +718,40 @@ async function boot(): Promise<void> {
     applyFramingForCurrentViewport(false, false);
   }
 
+  /**
+   * Lets go of everything a pointer was in the middle of: pointer captures are released, a stroke under way is
+   * finished and kept, foley stops, and every gesture in progress is forgotten. Called when the garden stops
+   * receiving input without being told the fingers lifted: the turn-sideways prompt covers it, the page is hidden
+   * or unloaded, or the window loses focus. On iOS, swiping up to the home screen or pulling Control Center down
+   * often delivers no pointerup or pointercancel at all; a finger left in `activeTouches` would make the next
+   * one-finger touch the second finger of a pinch.
+   */
+  function clearActiveInteractions(): void {
+    releaseAllCaptures();
+    if (raking) finishStroke();
+    audio.updateFoley(null);
+    foleyStationarySilenced = true;
+    activePointerId = null;
+    hoverRake = null;
+    hasPointerFb = false;
+    orbitDrag = null;
+    pinchDist = null;
+    activeTouches.clear();
+    hokiHoldStartMs = null;
+    hokiTouchHold = null;
+    touchRakeHold = null;
+    touchPreviewTag = null;
+    touchPlacingPointerId = null;
+    movingElement = null;
+    placingKind = null;
+  }
+
   /** Shows the turn-sideways prompt on an upright phone and hands the garden back once it is turned. */
   function updateRotatePrompt(): void {
     const blocked = rotatePrompt !== null && needsLandscape(window.innerWidth, window.innerHeight);
     if (blocked === rotateBlocked) return;
-    if (blocked) {
-      // release pointer captures and finish any active stroke so nothing fires or leaks foley under the prompt
-      releaseAllCaptures();
-      if (raking) finishStroke();
-      audio.updateFoley(null);
-      foleyStationarySilenced = true;
-      activePointerId = null;
-      hoverRake = null;
-      hasPointerFb = false;
-      orbitDrag = null;
-      pinchDist = null;
-      activeTouches.clear();
-      hokiHoldStartMs = null;
-      hokiTouchHold = null;
-      touchRakeHold = null;
-      touchPreviewTag = null;
-      touchPlacingPointerId = null;
-      movingElement = null;
-      placingKind = null;
-    }
+    // nothing fires or leaks foley under the prompt
+    if (blocked) clearActiveInteractions();
     applyRotateDom(blocked);
   }
 
@@ -734,12 +762,33 @@ async function boot(): Promise<void> {
   let sizedDpr = 0;
   let sizedDensity: PixelDensity | null = null;
 
+  // The canvas fills the stage, but never more than the window and the visual viewport show: a stage still at
+  // an upright phone's height after the screen has turned must not size a canvas taller than the screen
+  // (`boundedViewportSide`). Both are read every frame by `viewportDrifted`, so they allocate nothing.
+  function liveDeviceW(dpr: number): number {
+    const vv = window.visualViewport;
+    const cssW = boundedViewportSide(
+      stage ? stage.clientWidth : 0,
+      window.innerWidth,
+      vv && vv.scale <= VISUAL_VIEWPORT_MAX_SCALE ? vv.width : 0,
+    );
+    return Math.max(1, Math.round(cssW * dpr));
+  }
+
+  function liveDeviceH(dpr: number): number {
+    const vv = window.visualViewport;
+    const cssH = boundedViewportSide(
+      stage ? stage.clientHeight : 0,
+      window.innerHeight,
+      vv && vv.scale <= VISUAL_VIEWPORT_MAX_SCALE ? vv.height : 0,
+    );
+    return Math.max(1, Math.round(cssH * dpr));
+  }
+
   function updateViewportSize(): void {
     const dpr = window.devicePixelRatio || 1;
-    const cssW = stage && stage.clientWidth > 0 ? stage.clientWidth : window.innerWidth;
-    const cssH = stage && stage.clientHeight > 0 ? stage.clientHeight : window.innerHeight;
-    const deviceW = Math.max(1, Math.round(cssW * dpr));
-    const deviceH = Math.max(1, Math.round(cssH * dpr));
+    const deviceW = liveDeviceW(dpr);
+    const deviceH = liveDeviceH(dpr);
     if (deviceW === sizedW && deviceH === sizedH && dpr === sizedDpr && settings.density === sizedDensity) {
       updateRotatePrompt();
       return;
@@ -752,6 +801,59 @@ async function boot(): Promise<void> {
     renderer.resize(deviceW, deviceH, settings.density, dpr);
     applyFramingForCurrentViewport(true);
     updateRotatePrompt();
+  }
+
+  /** True when the page is scrolled, or the visual viewport has slid inside it without the page being zoomed. */
+  function pageScrolled(): boolean {
+    if (window.scrollX !== 0 || window.scrollY !== 0) return true;
+    const vv = window.visualViewport;
+    return vv != null && vv.scale <= VISUAL_VIEWPORT_MAX_SCALE && (vv.offsetLeft !== 0 || vv.offsetTop !== 0);
+  }
+
+  /** True when the renderer or the turn-sideways prompt no longer matches the window. Zero-allocation. */
+  function viewportDrifted(): boolean {
+    const dpr = window.devicePixelRatio || 1;
+    return (
+      dpr !== sizedDpr ||
+      liveDeviceW(dpr) !== sizedW ||
+      liveDeviceH(dpr) !== sizedH ||
+      (rotatePrompt !== null && needsLandscape(window.innerWidth, window.innerHeight)) !== rotateBlocked
+    );
+  }
+
+  /** Puts the page back at its origin and fits the canvas to the window as it is now. */
+  function resyncViewport(): void {
+    if (pageScrolled()) window.scrollTo(0, 0);
+    updateViewportSize();
+  }
+
+  // After the app returns to the foreground or the screen turns, iOS goes on settling its layout (the rotation
+  // animation, late `env(safe-area-inset-*)` values) and often sends no final resize. So a resume is followed by
+  // three more looks: the next frame, then about 150 ms and 400 ms later. A new resume restarts the two delays.
+  let settleFrame = 0;
+  let settleSoon: ReturnType<typeof setTimeout> | null = null;
+  let settleLate: ReturnType<typeof setTimeout> | null = null;
+  const onSettleFrame = (): void => {
+    settleFrame = 0;
+    resyncViewport();
+  };
+  const onSettleSoon = (): void => {
+    settleSoon = null;
+    resyncViewport();
+  };
+  const onSettleLate = (): void => {
+    settleLate = null;
+    resyncViewport();
+  };
+
+  /** The garden is in front again, or the screen turned: fit it now and again once the layout has settled. */
+  function resumeViewport(): void {
+    resyncViewport();
+    if (settleFrame === 0) settleFrame = requestAnimationFrame(onSettleFrame);
+    if (settleSoon !== null) clearTimeout(settleSoon);
+    settleSoon = setTimeout(onSettleSoon, RESUME_SETTLE_SOON_MS);
+    if (settleLate !== null) clearTimeout(settleLate);
+    settleLate = setTimeout(onSettleLate, RESUME_SETTLE_LATE_MS);
   }
 
   function syncSettings(next: SettingsState): void {
@@ -1007,7 +1109,7 @@ async function boot(): Promise<void> {
         movingElement = null;
         panel = "none";
         // Move focus off the hidden DOM mirror button so Arrow/Enter keys control stone placement cleanly
-        renderer.pipeline.canvas.focus();
+        renderer.pipeline.canvas.focus({ preventScroll: true });
         return;
       case "toggle_watch":
         watchGubbaRake = !watchGubbaRake;
@@ -1967,6 +2069,36 @@ async function boot(): Promise<void> {
   canvas.addEventListener("pointerup", onPointerUp);
   canvas.addEventListener("pointercancel", onPointerCancel);
 
+  /** True while pointer `id` is in the middle of something: a tracked finger, a stroke, an orbit, a hold, a stone. */
+  function pointerHasGesture(id: number): boolean {
+    return (
+      activeTouches.has(id) ||
+      (raking && !virtualDown && activePointerId === id) ||
+      orbitDrag?.pointerId === id ||
+      movingElement?.pointerId === id ||
+      touchRakeHold?.pointerId === id ||
+      hokiTouchHold?.pointerId === id ||
+      touchPlacingPointerId === id
+    );
+  }
+  // A pointer's capture ends after its pointerup or pointercancel, which have already tidied up, so this then
+  // finds nothing to do. iOS can also take a gesture for itself (the home indicator, an edge swipe) and end the
+  // capture with neither event; that finger is cancelled here instead of being left down for good.
+  canvas.addEventListener("lostpointercapture", (ev) => {
+    if (pointerHasGesture(ev.pointerId)) onPointerCancel(ev);
+  });
+
+  // iOS drops the GPU context of an app left in the background. Asking to keep the canvas lets the browser hand
+  // one back; the renderer then rebuilds its targets and the whole sand surface is uploaded again.
+  canvas.addEventListener("webglcontextlost", (ev) => {
+    ev.preventDefault();
+  });
+  canvas.addEventListener("webglcontextrestored", () => {
+    sizedW = 0;
+    sandReset = true;
+    updateViewportSize();
+  });
+
   canvas.addEventListener(
     "wheel",
     (ev) => {
@@ -2231,6 +2363,13 @@ async function boot(): Promise<void> {
   window.addEventListener("resize", updateViewportSize);
   // iOS browsers resize the visual viewport when the address bar hides or shows, often without a window resize
   window.visualViewport?.addEventListener("resize", updateViewportSize);
+  window.visualViewport?.addEventListener("scroll", resyncViewport);
+  // The stage is what the canvas fills, so its own box changing is the most direct signal there is
+  if (stage && typeof ResizeObserver === "function") new ResizeObserver(updateViewportSize).observe(stage);
+  // Turning the screen and coming back to the foreground (see also `visibilitychange` above)
+  window.addEventListener("orientationchange", resumeViewport);
+  window.addEventListener("pageshow", resumeViewport);
+  window.addEventListener("focus", resumeViewport);
 
   // Render initial frame immediately
   stepFrame(0);
@@ -2239,6 +2378,9 @@ async function boot(): Promise<void> {
     const rafLoop = (now: number): void => {
       const dt = Math.min(50, Math.max(0, now - lastWallMs));
       lastWallMs = now;
+      // Self-healing: iOS sometimes sends no resize, orientation or visibility event at all, so every frame looks
+      // for a window the renderer was not sized for (a few property reads, nothing allocated)
+      if (viewportDrifted() || pageScrolled()) resyncViewport();
       stepFrame(dt);
       requestAnimationFrame(rafLoop);
     };

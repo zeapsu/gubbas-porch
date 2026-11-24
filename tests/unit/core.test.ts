@@ -20,6 +20,7 @@ import type { HapticKind, HapticsEnv } from "../../src/ui/haptics.ts";
 import {
   createTouchBrush, discOffsets, pullTouchBrush, resetTouchBrush, TOUCH_BRUSH_RADIUS_PX, TOUCH_SLOP_PX,
 } from "../../src/ui/touch.ts";
+import { boundedViewportSide } from "../../src/ui/viewport.ts";
 
 const EMPTY_CONTEXT: StrokeStartContext = { stones: [], flow: false };
 const STONE: ElementInstance = {
@@ -634,6 +635,21 @@ describe("touch input steadying", () => {
     expect(brush).toMatchObject({ x: 5, y: 5, engaged: false });
   });
 
+  it("does not count rounding as movement when the finger stops at the end of the string", () => {
+    // Found by the property above as [{dx: -35, dy: -4}, {dx: 0, dy: 0}]: after the first pull Math.hypot puts the
+    // brush 3.0000000000000004 px from the finger, which is over the 3 px string by rounding alone.
+    const brush = createTouchBrush();
+    resetTouchBrush(brush, 0, 0);
+    expect(pullTouchBrush(brush, -35 / 4, -4 / 4, SLOP, RADIUS)).toBe(true);
+    const rest = { x: brush.x, y: brush.y };
+    expect(Math.hypot(-35 / 4 - rest.x, -4 / 4 - rest.y)).toBeGreaterThan(RADIUS);
+    expect(pullTouchBrush(brush, -35 / 4, -4 / 4, SLOP, RADIUS)).toBe(false);
+    expect(brush).toMatchObject(rest);
+    // a real step past the string still moves it
+    expect(pullTouchBrush(brush, -35 / 4 - 0.5, -4 / 4, SLOP, RADIUS)).toBe(true);
+    expect(brush.x).toBeLessThan(rest.x);
+  });
+
   it("lists the offsets of a disc nearest first, each exactly once", () => {
     const offsets = discOffsets(6);
     const seen = new Set<string>();
@@ -650,6 +666,43 @@ describe("touch input steadying", () => {
     expect(seen.size).toBe(113); // lattice points with dx² + dy² ≤ 36
     expect(seen.has("6,0") && seen.has("0,-6") && seen.has("-4,4") && !seen.has("5,4")).toBe(true);
     expect(discOffsets(0)).toEqual(Int8Array.of(0, 0));
+  });
+});
+
+describe("canvas box", () => {
+  it("fills the stage when the window agrees with it", () => {
+    expect(boundedViewportSide(844, 844, 844)).toBe(844);
+    // the stage is inset by the notch and the home bar, so it is the smallest of the three
+    expect(boundedViewportSide(726, 844, 844)).toBe(726);
+    expect(boundedViewportSide(369, 390, 390)).toBe(369);
+  });
+
+  it("never exceeds the window or the visual viewport when the stage is stale", () => {
+    // an installed iPhone app back from the background, turned on its side: the stage still has its upright height
+    expect(boundedViewportSide(810, 390, 390)).toBe(390);
+    // the window's own height can be just as stale; the visual viewport is what is on screen
+    expect(boundedViewportSide(810, 844, 390)).toBe(390);
+    expect(boundedViewportSide(810, 390, 0)).toBe(390);
+  });
+
+  it("skips a measure that is unknown", () => {
+    expect(boundedViewportSide(0, 844, 0)).toBe(844);
+    expect(boundedViewportSide(0, 844, 800)).toBe(800);
+    expect(boundedViewportSide(726, 0, 0)).toBe(726);
+    expect(boundedViewportSide(726, Number.NaN, -1)).toBe(726);
+    expect(boundedViewportSide(Number.NaN, 0, 0)).toBe(0);
+    expect(boundedViewportSide(0, 0, 390)).toBe(0);
+  });
+
+  it("is the smallest known side and never more than any of them", () => {
+    const side = fc.oneof(fc.constant(0), fc.double({ min: 0.5, max: 4000, noNaN: true }));
+    fc.assert(fc.property(side, side, side, (stage, win, visual) => {
+      const out = boundedViewportSide(stage, win, visual);
+      const base = [stage, win].filter(v => v > 0);
+      if (base.length === 0) return out === 0;
+      const known = visual > 0 ? [...base, visual] : base;
+      return out === Math.min(...known);
+    }));
   });
 });
 

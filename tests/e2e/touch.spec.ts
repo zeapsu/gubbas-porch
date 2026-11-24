@@ -988,6 +988,128 @@ test.describe("Gubba's Porch — mobile & touch controls", () => {
     expect(errors).toEqual([]);
   });
 
+  test("Interrupted touches: a finger still down when the app loses focus, is hidden, unloads or has its capture taken never becomes the second finger of a pinch", async ({
+    page,
+  }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
+    const cdp = await enterGarden(page);
+    await page.evaluate(() => {
+      const w = window as unknown as { __downIds: number[] };
+      w.__downIds = [];
+      document.getElementById("garden-canvas")!.addEventListener("pointerdown", (e) => w.__downIds.push(e.pointerId));
+    });
+    const lastDownId = (): Promise<number> => page.evaluate(() => (window as unknown as { __downIds: number[] }).__downIds.at(-1)!);
+    const hasCapture = (id: number): Promise<boolean> =>
+      page.evaluate((pid) => document.getElementById("garden-canvas")!.hasPointerCapture(pid), id);
+    const undoCount = (): Promise<number> => page.evaluate(() => window.__rakeMe!.state().undoCount);
+    const setHidden = (hidden: boolean): Promise<void> =>
+      page.evaluate((h) => {
+        Object.defineProperty(document, "hidden", { configurable: true, get: () => h });
+        Object.defineProperty(document, "visibilityState", { configurable: true, get: () => (h ? "hidden" : "visible") });
+        document.dispatchEvent(new Event("visibilitychange"));
+      }, hidden);
+    const cam0 = await cameraOf(page);
+
+    // On iOS, swiping up to the home screen, pulling Control Center down or an edge gesture takes the fingers away
+    // without a pointerup or pointercancel. Each way the page can learn of it must let go of the finger, keep the
+    // stroke it had drawn, and leave the next finger to rake alone.
+    const INTERRUPTS = [
+      { how: "blur", carving: true },
+      { how: "hidden", carving: false },
+      { how: "pagehide", carving: true },
+      { how: "lostcapture", carving: true },
+    ] as const;
+    let row = 16;
+    let fingerA = 300;
+    for (const { how, carving } of INTERRUPTS) {
+      const a0 = await sandClient(page, 24, row);
+      const a1 = await sandClient(page, 64, row + 2);
+      const a2 = await sandClient(page, 84, row + 2);
+      const b0 = await sandClient(page, 110, row + 4);
+      const b1 = await sandClient(page, 168, row + 6);
+      const hStart = await sandHash(page);
+      const undoStart = await undoCount();
+      // What finger A's stroke leaves when it is lifted where the interruption will find it: lifting closes the
+      // stroke's last step, so this, not the sand mid-stroke, is what an interrupted stroke must equal.
+      let hEnded = hStart;
+      if (carving) {
+        await touchSlide(cdp, fingerA + 5, lerp(a0, a1, 4));
+        await touchLift(cdp);
+        hEnded = await sandHash(page);
+        expect(hEnded).not.toBe(hStart);
+        expect(await page.evaluate(() => { window.__rakeMe!.undo(); return window.__rakeMe!.sandHash(); })).toBe(hStart);
+      }
+
+      // 1. Finger A lands on the sand: a stroke under way, or a press that has not left the tap slop yet.
+      await touchSlide(cdp, fingerA, carving ? lerp(a0, a1, 4) : [a0]);
+      await flushMoves(page);
+      const idA = await lastDownId();
+      const hCarved = await sandHash(page);
+      expect(hCarved !== hStart, `${how}: finger A ${carving ? "is carving" : "has drawn nothing yet"}`).toBe(carving);
+      expect(await hasCapture(idA), `${how}: finger A is captured`).toBe(true);
+
+      // 2. The interruption. No pointerup, no pointercancel.
+      if (how === "blur") await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+      else if (how === "hidden") await setHidden(true);
+      else if (how === "pagehide") await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide")));
+      else await page.evaluate((pid) => document.getElementById("garden-canvas")!.releasePointerCapture(pid), idA);
+      if (how === "hidden") await setHidden(false);
+
+      // 3. As far as the browser knows finger A is still down, and it drags on: that must draw nothing more.
+      const here = carving ? a1 : a0;
+      for (const p of lerp(here, a2, 3).slice(1)) {
+        await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ ...p, id: fingerA }] });
+      }
+      await flushMoves(page);
+      expect(await hasCapture(idA), `${how}: finger A's capture is released`).toBe(false);
+      expect(await sandHash(page), `${how}: the stroke ends where it was interrupted and draws no further`).toBe(hEnded);
+      expect(await undoCount(), `${how}: the stroke it had drawn is kept as one undo step`).toBe(undoStart + (carving ? 1 : 0));
+      expect(await page.evaluate(() => window.__rakeMe!.state().hoverRake), how).toBeNull();
+
+      // 4. A new finger rakes on its own while the old one is still "down": no pinch, no orbit, a clean stroke.
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ ...a2, id: fingerA }, { ...b0, id: fingerA + 1 }] });
+      for (const p of lerp(b0, b1, 6).slice(1)) {
+        await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ ...a2, id: fingerA }, { ...p, id: fingerA + 1 }] });
+      }
+      await flushMoves(page);
+      const hRaking = await sandHash(page);
+      expect(hRaking, `${how}: the next finger carves`).not.toBe(hEnded);
+      await touchLift(cdp);
+      const after = await page.evaluate(() => {
+        const api = window.__rakeMe!;
+        api.advance(400); // long enough for any orbit or zoom to show in the damped camera
+        return { camera: api.state().camera, undo: api.state().undoCount, hash: api.sandHash(), violations: api.paletteViolations() };
+      });
+      expect(after.camera, `${how}: the camera did not orbit or zoom`).toEqual(cam0);
+      expect(after.undo, `${how}: the new stroke is its own undo step`).toBe(undoStart + (carving ? 2 : 1));
+      expect(after.violations, how).toBe(0);
+      // and that one undo takes back exactly the new stroke
+      const hLifted = after.hash;
+      expect(await page.evaluate(() => { window.__rakeMe!.undo(); return window.__rakeMe!.sandHash(); }), how).toBe(hEnded);
+      expect(await page.evaluate(() => { window.__rakeMe!.redo(); return window.__rakeMe!.sandHash(); }), how).toBe(hLifted);
+
+      row += 22;
+      fingerA += 10;
+    }
+
+    // A thumb resting on a hanging rake when the app loses focus: the rake settles back, and the lift that
+    // arrives afterwards is not a tap that picks it up.
+    const rakeBefore = await page.evaluate(() => window.__rakeMe!.state().settings.rake);
+    const kinu = await pickCenterClient(page, "rake:kinu");
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ ...kinu, id: 390 }] });
+    expect(await page.evaluate(() => { window.__rakeMe!.advance(0); return window.__rakeMe!.state().hoverRake; })).toBe("kinu");
+    await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+    expect(await page.evaluate(() => { window.__rakeMe!.advance(0); return window.__rakeMe!.state().hoverRake; })).toBeNull();
+    await touchLift(cdp);
+    expect(await page.evaluate(() => window.__rakeMe!.state().settings.rake)).toBe(rakeBefore);
+
+    // An ordinary tap still selects: the capture that ends after a normal lift cancels nothing.
+    await touchTap(cdp, kinu.x, kinu.y, 391);
+    expect(await page.evaluate(() => window.__rakeMe!.state().settings.rake)).toBe("kinu");
+    expect(errors).toEqual([]);
+  });
+
   test("Haptics, Android path: every touch gesture plays its own pattern; mouse, pinch rollback and reduced motion stay silent", async ({
     page,
   }) => {

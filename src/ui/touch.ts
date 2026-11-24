@@ -55,7 +55,9 @@ export function pullTouchBrush(brush: TouchBrush, x: number, y: number, slop: nu
   const dx = x - brush.x;
   const dy = y - brush.y;
   const distance = Math.hypot(dx, dy);
-  if (distance <= radius) return false;
+  // The epsilon keeps a finger that has stopped from moving the brush: after a pull the brush sits `radius` away
+  // only to within rounding (Math.hypot can give 3.0000000000000004), and that is not movement.
+  if (distance <= radius + 1e-9) return false;
   const pull = (distance - radius) / distance;
   brush.x += dx * pull;
   brush.y += dy * pull;

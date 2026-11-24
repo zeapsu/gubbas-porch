@@ -947,3 +947,323 @@ test.describe("popular viewports: the whole garden stays on screen", () => {
     await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
   });
 });
+
+// ---- An installed web app on a phone (iOS "Add to Home Screen"): background, foreground and a turning screen ----
+
+/** Tells the page it went to the background or came back, the way a phone does (`document.hidden`, `visibilitychange`). */
+async function setPageHidden(page: Page, hidden: boolean): Promise<void> {
+  await page.evaluate((h) => {
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => h });
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => (h ? "hidden" : "visible") });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }, hidden);
+}
+
+/** How far the canvas sticks out of the stage or the window, in CSS pixels; 0 when it lies wholly inside both. */
+function canvasOverflow(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const c = document.getElementById("garden-canvas")!.getBoundingClientRect();
+    const s = document.getElementById("stage")!.getBoundingClientRect();
+    const right = Math.min(s.right, window.innerWidth);
+    const bottom = Math.min(s.bottom, window.innerHeight);
+    const out = Math.max(s.left - c.left, s.top - c.top, c.right - right, c.bottom - bottom, 0);
+    // one layout unit of rounding at a fractional device pixel ratio, and a canvas that has not been sized at all
+    return c.width > 0 && c.height > 0 ? (out <= 1 / 64 + 1e-6 ? 0 : out) : Infinity;
+  });
+}
+
+test.describe("an installed phone app: back from the background with the screen turned", () => {
+  test.use({ viewport: { width: 844, height: 390 }, deviceScaleFactor: 3, hasTouch: true, isMobile: true });
+
+  test("on its side, to the background, upright, to the foreground, on its side again: the whole garden is back even while the stage is stale", async ({
+    page,
+  }) => {
+    const errors = watchErrors(page);
+    await page.goto("?test=1");
+    await page.waitForFunction(() => Boolean(window.__rakeMe));
+    await page.touchscreen.tap(422, 195);
+    await expect(page.locator("#title-card")).toBeHidden();
+    const prompt = page.locator("#rotate-prompt");
+    const home = await page.evaluate(() => {
+      const api = window.__rakeMe!;
+      api.setMood("afternoon");
+      api.setCamera("cozy");
+      api.advance(16);
+      return { fb: api.fbSize(), camera: api.state().camera, hash: api.sandHash() };
+    });
+    expect(home.fb).toMatchObject({ fbW: 422, fbH: 195, scale: 6 });
+
+    // the page is pinned: there is nothing to scroll or rubber-band behind the stage
+    const pinned = await page.evaluate(() => {
+      window.scrollTo(0, 200);
+      const root = getComputedStyle(document.documentElement);
+      const body = getComputedStyle(document.body);
+      return { scroll: [window.scrollX, window.scrollY], root: root.position, body: body.position, rootH: root.height, bodyH: body.height };
+    });
+    expect(pinned).toEqual({ scroll: [0, 0], root: "fixed", body: "fixed", rootH: "390px", bodyH: "390px" });
+
+    // 1. To the background on its side; the phone is turned upright while the app is away, then it comes back.
+    await setPageHidden(page, true);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await setPageHidden(page, false);
+    await expect(prompt).toBeVisible();
+    expect(await canvasOverflow(page), "upright, behind the prompt").toBe(0);
+
+    // 2. Turned on its side again. iOS leaves the fixed stage at its upright height for a while: here it stays.
+    await page.evaluate(() => {
+      const s = document.getElementById("stage")!.style;
+      s.bottom = "auto";
+      s.height = `${window.innerHeight}px`;
+    });
+    await page.setViewportSize({ width: 844, height: 390 });
+    await expect(prompt).toBeHidden();
+    const stale = await page.evaluate(() => {
+      const api = window.__rakeMe!;
+      api.advance(16); // the test clock is frozen, so draw one frame at the new size before reading it back
+      const stage = document.getElementById("stage")!;
+      const { fbW, fbH } = api.fbSize();
+      return {
+        stage: [stage.clientWidth, stage.clientHeight],
+        win: [window.innerWidth, window.innerHeight],
+        fb: api.fbSize(),
+        state: api.state(),
+        bounds: api.pickBounds(),
+        hud: api.overlayHits().filter((h) => h.action.type === "hud"),
+        outside: api.overlayHits().filter((h) => h.x < 0 || h.y < 0 || h.x + h.w > fbW || h.y + h.h > fbH).length,
+        violations: api.paletteViolations(),
+      };
+    });
+    expect(stale.stage, "the stage really is stale: an upright phone's height on a screen lying on its side").toEqual([844, 844]);
+    expect(stale.win).toEqual([844, 390]);
+    expect(await canvasOverflow(page), "canvas inside the stage and the window").toBe(0);
+    expect(stale.fb, "the same framebuffer as before the app went away").toEqual(home.fb);
+    expect(stale.state.rotateBlocked).toBe(false);
+    expect(stale.state.camera).toEqual(home.camera);
+    expect(stale.violations).toBe(0);
+    expect(stale.hud).toHaveLength(6);
+    expect(stale.outside, "overlay controls outside the framebuffer").toBe(0);
+    expectInsideFrame(stale.bounds.gubba, stale.fb, "stale stage: Gubba");
+    expectInsideFrame(stale.bounds.basket, stale.fb, "stale stage: basket");
+    for (const id of RAKES) {
+      if (id !== stale.state.settings.rake) expectInsideFrame(stale.bounds[`rake:${id}`], stale.fb, `stale stage: rake ${id}`);
+    }
+    await expectIntegerScale(page, "stale stage");
+    await page.screenshot({ path: "test-results/viewport-resume-stale-stage.png" });
+
+    // 3. The stage settles late, with no window event at all: nothing moves, and the garden plays under a finger.
+    await page.evaluate(() => {
+      const s = document.getElementById("stage")!.style;
+      s.bottom = "";
+      s.height = "";
+    });
+    await expect.poll(() => page.evaluate(() => document.getElementById("stage")!.clientHeight)).toBe(390);
+    await page.evaluate(() => new Promise<void>((done) => setTimeout(done, 450))); // past the last settle look
+    expect(await canvasOverflow(page), "settled").toBe(0);
+    const settled = await page.evaluate(() => {
+      const api = window.__rakeMe!;
+      api.advance(16);
+      return { fb: api.fbSize(), state: api.state(), violations: api.paletteViolations(), hash: api.sandHash() };
+    });
+    expect(settled.fb).toEqual(home.fb);
+    expect(settled.state.rotateBlocked).toBe(false);
+    expect(settled.state.camera).toEqual(home.camera);
+    expect(settled.violations).toBe(0);
+    expect(settled.hash, "nothing was raked along the way").toBe(home.hash);
+    await expectOverlayTidy(page, "after the resume");
+
+    const stroke = await page.evaluate(() => {
+      const api = window.__rakeMe!;
+      const { fbW, fbH } = api.fbSize();
+      const rect = document.getElementById("garden-canvas")!.getBoundingClientRect();
+      const at = (x: number, z: number): { x: number; y: number } => {
+        const p = api.project(x, 3, z)!;
+        return { x: rect.left + (p.x / fbW) * rect.width, y: rect.top + (p.y / fbH) * rect.height };
+      };
+      return { from: at(-40, 0), to: at(40, 6) };
+    });
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ ...stroke.from, id: 1 }] });
+    for (let i = 1; i <= 6; i++) {
+      const t = i / 6;
+      const p = { x: stroke.from.x + (stroke.to.x - stroke.from.x) * t, y: stroke.from.y + (stroke.to.y - stroke.from.y) * t };
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ ...p, id: 1 }] });
+    }
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    const raked = await page.evaluate(() => {
+      const api = window.__rakeMe!;
+      api.advance(16);
+      return { hash: api.sandHash(), camera: api.state().camera, violations: api.paletteViolations() };
+    });
+    expect(raked.hash, "a finger rakes the sand after the resume").not.toBe(home.hash);
+    expect(raked.camera).toEqual(home.camera);
+    expect(raked.violations).toBe(0);
+    expect(errors).toEqual([]);
+  });
+
+  test("every way back to the foreground looks again after the layout settles, without ResizeObserver or a resize event", async ({
+    page,
+  }) => {
+    const errors = watchErrors(page);
+    await page.addInitScript(() => {
+      delete (window as { ResizeObserver?: unknown }).ResizeObserver;
+    });
+    await page.goto("?test=1");
+    await page.waitForFunction(() => Boolean(window.__rakeMe));
+    await page.touchscreen.tap(422, 195);
+    expect(await page.evaluate(() => typeof ResizeObserver)).toBe("undefined");
+
+    // The safe-area insets arrive just after the app is told it is back; nothing announces them.
+    const WAKES = [
+      { type: "visibilitychange", inset: 47 },
+      { type: "pageshow", inset: 0 },
+      { type: "focus", inset: 59 },
+      { type: "orientationchange", inset: 21 },
+    ] as const;
+    for (const wake of WAKES) {
+      const staleRightAfter = await page.evaluate(({ type, inset }) => {
+        const stage = document.getElementById("stage")!;
+        (type === "visibilitychange" ? document : window).dispatchEvent(new Event(type));
+        stage.style.left = stage.style.right = `${inset}px`;
+        const c = document.getElementById("garden-canvas")!.getBoundingClientRect();
+        const s = stage.getBoundingClientRect();
+        return Math.abs(c.width - s.width) > 8;
+      }, wake);
+      expect(staleRightAfter, `${wake.type}: the canvas is not yet fitted to the new stage`).toBe(true);
+      await expect
+        .poll(() => page.evaluate(() => {
+          const stage = document.getElementById("stage")!;
+          const fb = window.__rakeMe!.fbSize();
+          // fitted: inside the stage, and using all of it but less than one scene pixel
+          return fb.cssW <= stage.clientWidth && stage.clientWidth - fb.cssW < fb.scale / window.devicePixelRatio + 1;
+        }), { message: `${wake.type}: fitted once the layout settled`, timeout: 2000 })
+        .toBe(true);
+      expect(await canvasOverflow(page), wake.type).toBe(0);
+      const drawn = await page.evaluate(() => {
+        const api = window.__rakeMe!;
+        api.advance(16);
+        return { violations: api.paletteViolations(), blocked: api.state().rotateBlocked, gubba: api.pickBounds().gubba, fb: api.fbSize() };
+      });
+      expect(drawn.violations, wake.type).toBe(0);
+      expect(drawn.blocked, wake.type).toBe(false);
+      expectInsideFrame(drawn.gubba, drawn.fb, `${wake.type}: Gubba`);
+    }
+    expect(errors).toEqual([]);
+  });
+
+  test("a GPU context dropped in the background is handed back and the garden draws the same frame", async ({ page }) => {
+    const errors = watchErrors(page);
+    await page.goto("?test=1");
+    await page.waitForFunction(() => Boolean(window.__rakeMe));
+    await page.touchscreen.tap(422, 195);
+    const before = await page.evaluate(() => {
+      const api = window.__rakeMe!;
+      api.setMood("afternoon");
+      api.loadPreset("three_islands");
+      // Carve an incremental dirty-rect stroke so heightTex.image.data is stale before context loss,
+      // verifying webglcontextrestored forces a full sand upload (`sandReset = true`).
+      api.stroke([
+        { x: 24, y: 24 },
+        { x: 64, y: 24 },
+        { x: 96, y: 40 },
+      ]);
+      api.advance(16);
+      return { frame: api.frameHash(), sand: api.sandHash(), fb: api.fbSize(), violations: api.paletteViolations() };
+    });
+    expect(before.violations).toBe(0);
+
+    const after = await page.evaluate(async () => {
+      const api = window.__rakeMe!;
+      const canvas = document.getElementById("garden-canvas") as HTMLCanvasElement;
+      const gl = canvas.getContext("webgl2")!;
+      const ext = gl.getExtension("WEBGL_lose_context")!;
+      const once = (type: string): Promise<Event> => new Promise((done) => canvas.addEventListener(type, done, { once: true }));
+      const lost = once("webglcontextlost");
+      ext.loseContext();
+      const lostEvent = await lost;
+      api.advance(0); // a frame asked for while the context is gone must not throw
+      // the browser allows a restore only once the lost event has been delivered to every listener
+      await new Promise((done) => setTimeout(done, 0));
+      const restored = once("webglcontextrestored");
+      ext.restoreContext();
+      await restored;
+      api.advance(0); // the clock has not moved, so the frame must be the one drawn before the loss
+      return {
+        kept: lostEvent.defaultPrevented,
+        lost: gl.isContextLost(),
+        frame: api.frameHash(),
+        sand: api.sandHash(),
+        fb: api.fbSize(),
+        violations: api.paletteViolations(),
+        failed: api.failedModels().length,
+      };
+    });
+    expect(after.kept, "the canvas asks to be given its context back").toBe(true);
+    expect(after.lost).toBe(false);
+    expect(after.fb).toEqual(before.fb);
+    expect(after.sand).toBe(before.sand);
+    expect(after.violations).toBe(0);
+    expect(after.failed).toBe(0);
+    expect(after.frame, "the restored context draws the same frame").toBe(before.frame);
+    expect(await canvasOverflow(page)).toBe(0);
+    expect(errors).toEqual([]);
+  });
+});
+
+test.describe("the running garden, outside test mode", () => {
+  test("with every resize and orientation event swallowed, the frame loop alone shows the prompt, hides it and keeps the canvas on screen", async ({
+    page,
+  }) => {
+    const errors = watchErrors(page);
+    // iOS WebKit sometimes sends nothing at all when an installed app turns: swallow every signal but the frames
+    await page.addInitScript(() => {
+      delete (window as { ResizeObserver?: unknown }).ResizeObserver;
+      const swallow = (ev: Event): void => ev.stopImmediatePropagation();
+      for (const type of ["resize", "orientationchange", "pageshow", "focus"]) window.addEventListener(type, swallow, true);
+      window.visualViewport?.addEventListener("resize", swallow, true);
+      window.visualViewport?.addEventListener("scroll", swallow, true);
+    });
+    await page.setViewportSize({ width: 844, height: 390 });
+    await page.goto("./");
+    const canvas = page.locator("#garden-canvas");
+    const sized = (): Promise<{ w: number; h: number; backing: number[] }> =>
+      canvas.evaluate((c: HTMLCanvasElement) => {
+        const r = c.getBoundingClientRect();
+        return { w: Math.round(r.width), h: Math.round(r.height), backing: [c.width, c.height] };
+      });
+    await expect.poll(async () => (await sized()).w, { timeout: 20_000 }).toBeGreaterThan(800);
+    expect(await page.evaluate(() => "__rakeMe" in window), "a production page without ?test=1 has no test hooks").toBe(false);
+    await page.locator("#title-card").click();
+    const prompt = page.locator("#rotate-prompt");
+    await expect(prompt).toBeHidden();
+    const landscape = await sized();
+
+    // upright: no event reaches the page, yet the prompt comes up and the canvas follows the window
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(prompt).toBeVisible();
+    await expect.poll(async () => (await sized()).w).toBeLessThanOrEqual(390);
+    expect(await canvasOverflow(page), "upright").toBe(0);
+
+    // on its side again with the stage stuck at its upright height: the prompt leaves and nothing is cut off
+    await page.evaluate(() => {
+      const s = document.getElementById("stage")!.style;
+      s.bottom = "auto";
+      s.height = `${window.innerHeight}px`;
+    });
+    await page.setViewportSize({ width: 844, height: 390 });
+    await expect(prompt).toBeHidden();
+    await expect.poll(sized).toEqual(landscape);
+    expect(await page.evaluate(() => document.getElementById("stage")!.clientHeight)).toBe(844);
+    expect(await canvasOverflow(page), "on its side, stage stale").toBe(0);
+
+    // a late inset with nothing to announce it
+    await page.evaluate(() => {
+      const s = document.getElementById("stage")!.style;
+      s.bottom = "";
+      s.height = "";
+      s.left = s.right = "47px";
+    });
+    await expect.poll(async () => (await sized()).w).toBeLessThanOrEqual(750);
+    expect(await canvasOverflow(page), "inset").toBe(0);
+    expect(errors).toEqual([]);
+  });
+});

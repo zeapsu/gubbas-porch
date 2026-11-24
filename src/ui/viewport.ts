@@ -13,6 +13,26 @@ export const PHONE_MAX_WIDTH = 600;
 /** Taller than this multiple of its width, a window counts as upright. */
 export const UPRIGHT_RATIO = 1.15;
 
+/** Above this visual-viewport scale the page is pinch-zoomed, and the visual viewport no longer measures the window. */
+export const VISUAL_VIEWPORT_MAX_SCALE = 1.01;
+
+/**
+ * One side (width or height) of the box the canvas may fill, in CSS pixels: the stage's own side, but never more
+ * than the window or the visual viewport shows.
+ *
+ * iOS WebKit can leave a fixed-position box at its old size for a while after the screen turns, most often when
+ * an installed web app comes back from the background in the other orientation. Sized from that box alone, the
+ * canvas would be an upright phone's height on a screen lying on its side, and its lower half would be cut off.
+ * A measure that is zero, negative or not a number is unknown and is skipped; `visualSide` only bounds a known
+ * stage or window side, and when neither stage nor window is known the result is 0.
+ */
+export function boundedViewportSide(stageSide: number, windowSide: number, visualSide: number): number {
+  let side = stageSide > 0 ? stageSide : windowSide > 0 ? windowSide : 0;
+  if (windowSide > 0 && windowSide < side) side = windowSide;
+  if (visualSide > 0 && visualSide < side) side = visualSide;
+  return side;
+}
+
 /** True when a window of cssW × cssH CSS pixels should show the turn-sideways prompt instead of the garden. */
 export function needsLandscape(cssW: number, cssH: number): boolean {
   return cssW < PHONE_MAX_WIDTH && cssH > cssW * UPRIGHT_RATIO;

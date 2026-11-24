@@ -28,10 +28,16 @@
       }
       html,
       body {
+        /* Pinned to the screen so there is nothing to scroll: an installed web app on iOS can otherwise slide or
+           rubber-band the page behind the stage when it comes back from the background or the screen turns.
+           The plain 100% is for browsers without dynamic viewport units. */
+        position: fixed;
+        inset: 0;
         margin: 0;
         padding: 0;
         width: 100%;
         height: 100%;
+        height: 100dvh;
         overflow: hidden;
         background: #2a1d1a;
         color: #f4ead0;
