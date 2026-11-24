@@ -25,13 +25,13 @@
     "verify": "npm run review:gate && npm run typecheck && npm run lint && npm run verify:assets && npm run test:unit && BASE_PATH=/gubbas-porch/ npm run build && npm run check:bundle && BASE_PATH=/ npm run build && npm run test:e2e"
   },
   "dependencies": {
-    "three": "^0.175.0"
+    "three": "^0.187.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.24.0",
     "@playwright/test": "^1.51.1",
     "@types/node": "^22.14.0",
-    "@types/three": "^0.175.0",
+    "@types/three": "^0.187.0",
     "eslint": "^9.24.0",
     "fast-check": "^3.23.2",
     "globals": "^16.0.0",
