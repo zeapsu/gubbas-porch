@@ -1,6 +1,10 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
+  AUTO_DONE_LINES,
+  AUTO_SIP_DELAY_MS,
+  AUTO_START_LINES,
+  AUTO_YIELD_LINES,
   BREATH_CUES,
   DOZE_AFTER_MS,
   FIRST_VISIT_LINE,
@@ -199,11 +203,29 @@ describe("Gubba lines", () => {
   });
 
   it("covers every trigger tag", () => {
-    const tags = ["first", "idle", "rain", "sweep", "stone", "breath", "basket"];
+    const tags = ["first", "idle", "rain", "sweep", "stone", "breath", "basket", "auto_start", "auto_done", "auto_yield"];
     for (const m of MOODS) tags.push(`mood:${m}`);
     for (const v of VARIANTS) tags.push(`variant:${v}`);
     for (const t of tags) expect(linesForTag(t).length, t).toBeGreaterThan(0);
     expect(BREATH_CUES).toMatchObject({ inhale: "In.", hold_in: "Hold.", exhale: "Out." });
+  });
+
+  it("has four lines each for getting up to rake, finishing, and giving the garden back", () => {
+    const pools = { auto_start: AUTO_START_LINES, auto_done: AUTO_DONE_LINES, auto_yield: AUTO_YIELD_LINES };
+    const all: string[] = [];
+    for (const [tag, pool] of Object.entries(pools)) {
+      expect(pool, tag).toHaveLength(4);
+      expect(linesForTag(tag), tag).toEqual(pool);
+      for (const text of pool) {
+        expect(text.length, text).toBeLessThanOrEqual(MAX_LINE_CHARS);
+        expect(text, text).not.toContain("!");
+        expect(wrapBitmapLineCount(text), text).toBeLessThanOrEqual(MAX_LINE_ROWS);
+      }
+      all.push(...pool);
+    }
+    expect(new Set(all).size).toBe(12);
+    // no line of his own is borrowed from another pool
+    for (const text of all) expect(LINES.filter((l) => l.text === text), text).toHaveLength(1);
   });
 });
 
@@ -643,6 +665,52 @@ describe("Gubba pose", () => {
     expect(poseGubba(g, 0, 6500).Mouth.pos.y).toBe(0);
   });
 
+  it("up and raking himself, he does not doze, sip, or turn to follow anyone else's rake", () => {
+    let g = fresh();
+    const neverSipped = g.sipStartMs;
+    for (let t = 0; t <= DOZE_AFTER_MS + 200_000; t += 1000) {
+      g = stepGubba(g, tick({ working: true, raking: true, rakeGridPos: { x: 10, y: 50 }, pointerOnWall: true }), t);
+      expect(g.dozing).toBe(false);
+      expect(g.watchingRake).toBe(false);
+      expect(g.glancingWall).toBe(false);
+      expect(g.targetYaw).toBe(0);
+    }
+    // more than one sip came due in that time; none was taken
+    expect(g.sipStartMs).toBe(neverSipped);
+    // seated and idle again, the usual life resumes
+    let idle = g;
+    for (let t = DOZE_AFTER_MS + 201_000; t <= 2 * DOZE_AFTER_MS + 300_000; t += 1000) idle = stepGubba(idle, tick(), t);
+    expect(idle.dozing).toBe(true);
+  });
+
+  it("back on the cushion with a garden finished, the tea comes 2.5 s later", () => {
+    let g = fresh();
+    for (let t = 0; t <= 50_000; t += 1000) g = stepGubba(g, tick({ working: true }), t);
+    const before = g.sipStartMs;
+    g = stepGubba(g, { type: "auto_done" }, 50_500);
+    expect(g.nextSipMs).toBe(50_500 + AUTO_SIP_DELAY_MS);
+    g = stepGubba(g, tick(), 50_500 + AUTO_SIP_DELAY_MS - 1);
+    expect(g.sipStartMs).toBe(before);
+    g = stepGubba(g, tick(), 50_500 + AUTO_SIP_DELAY_MS);
+    expect(g.sipStartMs).toBe(50_500 + AUTO_SIP_DELAY_MS);
+    expect(AUTO_SIP_DELAY_MS).toBe(2500);
+  });
+
+  it("remarks on getting up, finishing and giving way from the matching pool, and never in Quiet", () => {
+    const pools = { auto_start: AUTO_START_LINES, auto_done: AUTO_DONE_LINES, auto_yield: AUTO_YIELD_LINES } as const;
+    for (const type of ["auto_start", "auto_done", "auto_yield"] as const) {
+      for (let seed = 1; seed <= 20; seed++) {
+        const companion = stepGubba(fresh("companion", "moss", seed), { type }, 200_000);
+        expect(pools[type], `${type} ${seed}`).toContain(companion.speech?.text);
+        expect(companion.dozing).toBe(false);
+        const quiet = stepGubba(fresh("quiet", "moss", seed), { type }, 200_000);
+        expect(quiet.speech, `${type} ${seed}`).toBeNull();
+        const sometimes = stepGubba(fresh("sometimes", "moss", seed), { type }, 200_000);
+        if (sometimes.speech !== null) expect(pools[type]).toContain(sometimes.speech.text);
+      }
+    }
+  });
+
   it("sips for 1.2 s: arm strains up, head dips, cup lifts", () => {
     const g = fresh();
     g.sipStartMs = 20_000;
@@ -818,6 +886,19 @@ describe("keyboard mapping", () => {
     expect(down("w")).toEqual({ type: "orbit", dir: 1 });
   });
 
+  it("maps R to Gubba mode, and leaves the browser its reload", () => {
+    expect(down("r")).toEqual({ type: "toggle_gubba_mode" });
+    expect(down("R")).toEqual({ type: "toggle_gubba_mode" });
+    expect(down("R", { shiftKey: true })).toEqual({ type: "toggle_gubba_mode" });
+    expect(down("r", { ctrlKey: true })).toBeNull();
+    expect(down("r", { metaKey: true })).toBeNull();
+    expect(down("r", { altKey: true })).toBeNull();
+    expect(down("R", { ctrlKey: true, shiftKey: true })).toBeNull();
+    expect(down("r", { repeat: true })).toBeNull();
+    expect(down("r", { targetTag: "INPUT" })).toBeNull();
+    expect(mapKeyUp({ key: "r" })).toBeNull();
+  });
+
   it("maps the arrows to the virtual rake, repeating", () => {
     expect(down("ArrowLeft")).toEqual({ type: "virtual_move", dx: -1, dy: 0, fast: false });
     expect(down("ArrowDown", { shiftKey: true, repeat: true })).toEqual({ type: "virtual_move", dx: 0, dy: 1, fast: true });
@@ -952,6 +1033,29 @@ describe("DOM mirror", () => {
     expect(find("gubba-variant").getAttribute("aria-label")).toContain("Lantern Yabba");
     expect(find("mood-auto").getAttribute("aria-label")).toContain("manual");
     expect(find("rain").getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("has a Gubba mode button under Presets that says and shows whether it is on", () => {
+    const { doc, body } = fakeDoc();
+    const seen: UiCommand[] = [];
+    const m = createDomMirror(doc, (c) => seen.push(c));
+    const find = (id: string) => body.all().find((e) => e.getAttribute("data-control") === id)!;
+    m.sync({ settings: DEFAULT_SETTINGS, mood: "afternoon" });
+    expect(find("gubba-mode").getAttribute("aria-pressed")).toBe("false");
+    expect(find("gubba-mode").getAttribute("aria-label")).toBe("Gubba mode, off. Gubba rakes one garden after another");
+    m.sync({ settings: DEFAULT_SETTINGS, mood: "afternoon", gubbaMode: true });
+    expect(find("gubba-mode").getAttribute("aria-pressed")).toBe("true");
+    expect(find("gubba-mode").getAttribute("aria-label")).toBe("Gubba mode, on. Gubba rakes one garden after another");
+    expect(find("gubba-mode").textContent).toBe(find("gubba-mode").getAttribute("aria-label"));
+    m.sync({ settings: DEFAULT_SETTINGS, mood: "afternoon", gubbaMode: false, watchGubbaRake: true });
+    expect(find("gubba-mode").getAttribute("aria-pressed")).toBe("false");
+    expect(find("watch-gubba-rake").getAttribute("aria-pressed")).toBe("true");
+    // it sits with the presets, right after the Watch switch
+    const ids = body.all().filter((e) => e.tagName === "BUTTON").map((b) => b.getAttribute("data-control"));
+    expect(ids.indexOf("gubba-mode")).toBe(ids.indexOf("watch-gubba-rake") + 1);
+    expect(find("gubba-mode").parent).toBe(find("watch-gubba-rake").parent);
+    find("gubba-mode").click();
+    expect(seen).toEqual([{ type: "toggle_gubba_mode" }]);
   });
 
   it("mirrors every Gubba line into the live region with textContent only", () => {

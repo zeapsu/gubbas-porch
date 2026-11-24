@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "specSha256": "45358c486f0f60886a07269270e1e82fb0ef7dc589a185d32b75d4cb5f09fd5d",
+  "specSha256": "4bf78146489f8f0132a8a374d181d5ad055da79904a5217d26f70bb4a4c44e8d",
   "models": [
     {
       "id": "rake_sugi",
@@ -934,11 +934,12 @@
     {
       "id": "gubba_moss",
       "file": "gubba_moss.glb",
-      "bytes": 62628,
-      "sha256": "fecbc6402269b13ce99bd952967776e1317ceb3ec86cf9626721c5cf6782fd5c",
+      "bytes": 63200,
+      "sha256": "54b378cbca6389edac624dbda4a6dd432af8433d49cd4803803e292e1e840ef9",
       "triangles": 1762,
       "vertices": 1479,
       "nodes": [
+        "Cushion",
         "Cup",
         "ArmL",
         "ArmR",
@@ -958,8 +959,8 @@
         "Root"
       ],
       "materials": [
-        "rm_wood",
         "rm_warm",
+        "rm_wood",
         "rm_gubba",
         "rm_ink",
         "rm_cloth",
@@ -988,11 +989,12 @@
     {
       "id": "gubba_kasa",
       "file": "gubba_kasa.glb",
-      "bytes": 58904,
-      "sha256": "349c4e3a8bc4d71151bc9b5bf850c54a029a100c0cb454ab00225011bb90247b",
+      "bytes": 59352,
+      "sha256": "be083113dca8d7f09ce069b74c2c0fb552020f2c59eaf2e971ff004016bfa239",
       "triangles": 1708,
       "vertices": 1330,
       "nodes": [
+        "Cushion",
         "Cup",
         "ArmL",
         "ArmR",
@@ -1012,8 +1014,8 @@
         "Root"
       ],
       "materials": [
-        "rm_cloth",
         "rm_warm",
+        "rm_cloth",
         "rm_gubba",
         "rm_ink",
         "rm_wood_light",

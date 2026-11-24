@@ -181,7 +181,16 @@ export interface GubbaSpeech {
 }
 
 export type GubbaEvent =
-  | { type: "tick"; pointerOnWall: boolean; raking: boolean; rakeGridPos: Vec2 | null; rain: boolean; breathPhase: BreathPhase }
+  | {
+      type: "tick";
+      pointerOnWall: boolean;
+      raking: boolean;
+      rakeGridPos: Vec2 | null;
+      rain: boolean;
+      breathPhase: BreathPhase;
+      /** Gubba is up and raking himself (Gubba mode): he neither dozes nor sips, and has no rake to watch. */
+      working?: boolean;
+    }
   | { type: "rake_selected"; rakeId: RakeId }
   | { type: "mood_changed"; mood: MoodId }
   | { type: "gubba_tapped"; activeRake: RakeId }
@@ -190,7 +199,11 @@ export type GubbaEvent =
   | { type: "rain_toggled"; on: boolean }
   | { type: "breath_toggled"; on: boolean }
   | { type: "talk_mode_changed"; mode: TalkMode }
-  | { type: "first_visit" };
+  | { type: "first_visit" }
+  /** Gubba mode and "Watch: Gubba rakes": he gets up to rake, finishes a garden, or gives way to the player. */
+  | { type: "auto_start" }
+  | { type: "auto_done" }
+  | { type: "auto_yield" };
 
 export interface GubbaState {
   variant: GubbaVariant;

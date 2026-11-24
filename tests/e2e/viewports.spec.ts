@@ -4,12 +4,15 @@ import type { Page } from "@playwright/test";
 // Popular real-world windows, driven in real Chromium WebGL2 (DESIGN.md 2.4, 10.3). Every playable window must
 // show the whole garden — bed, Wall of Rakes, Gubba, stone basket — with nothing touching the frame edge, keep
 // every HUD and panel control inside the framebuffer, and scale by a whole number. An upright phone gets the
-// turn-sideways prompt instead and plays once it is turned.
+// turn-sideways prompt instead and plays once it is turned. A phone on its side, at its real pixel ratio and with
+// the browser's bars and the notch taken out of the window, must have controls a thumb can hit.
 
 interface Viewport {
   width: number;
   height: number;
   name: string;
+  /** Name its screenshots are kept under in test-results/, when not just width x height. */
+  shot?: string;
 }
 
 const PLAYABLE: readonly Viewport[] = [
@@ -24,19 +27,37 @@ const PLAYABLE: readonly Viewport[] = [
   { width: 667, height: 375, name: "small phone landscape" },
 ];
 
+interface Phone extends Viewport {
+  dpr: number;
+  /** Where Settings and the basket open: above the HUD as on a desktop, or beside it in a window too short for that. */
+  panels: "above" | "beside";
+}
+
+/**
+ * Phones on their side at their real device pixel ratio: one full screen, then two as a mobile browser really gives
+ * them to the page, where the address bar, tab strip and safe-area insets leave a window far shorter than the screen.
+ */
+const PHONES: readonly Phone[] = [
+  { width: 844, height: 390, dpr: 3, panels: "above", name: "phone landscape, full screen", shot: "844x390@3x" },
+  { width: 726, height: 275, dpr: 3, panels: "beside", name: "phone landscape inside browser chrome" },
+  { width: 667, height: 260, dpr: 2, panels: "beside", name: "small phone landscape inside browser chrome" },
+];
+/** The side a HUD object has at least on a phone, in CSS pixels (`TOUCH_MIN_CSS` in the overlay). */
+const THUMB_CSS = 40;
+
 const PORTRAIT_PHONES: readonly Viewport[] = [
   { width: 390, height: 844, name: "phone portrait" },
   { width: 360, height: 800, name: "Android portrait" },
 ];
 
 /** Sizes whose screenshots are kept in test-results/ for a human to look at. */
-const SCREENSHOTS = new Set(["1440x900", "1024x768", "768x1024", "640x720", "844x390", "390x844"]);
+const SCREENSHOTS = new Set(["1440x900", "1024x768", "768x1024", "640x720", "844x390", "390x844", "844x390@3x", "726x275", "667x260"]);
 
 const VARIANTS = ["moss", "kasa", "lantern"] as const;
 const RAKES = ["sugi", "onami", "kinu", "hisui", "mikazuki", "tetsu", "wa", "take", "nagi", "hoki"] as const;
 const TABS = ["look", "garden", "sound", "presets"] as const;
 /** Controls each Settings tab offers (Gubba + mood + camera + pixels, and so on). */
-const TAB_CONTROLS: Readonly<Record<(typeof TABS)[number], number>> = { look: 13, garden: 12, sound: 34, presets: 10 };
+const TAB_CONTROLS: Readonly<Record<(typeof TABS)[number], number>> = { look: 13, garden: 12, sound: 34, presets: 12 };
 /** Pixels the bed's corners must keep from the frame edge (the framing margin is 6 for the frame around them). */
 const BED_MARGIN = 6;
 
@@ -56,32 +77,110 @@ async function open(page: Page, vp: Viewport): Promise<void> {
   await page.waitForFunction(() => Boolean(window.__rakeMe));
 }
 
-/** The canvas is a whole multiple of the framebuffer, sits wholly inside the window, and wastes under one pixel. */
+/**
+ * The canvas is a whole multiple of the framebuffer in device pixels, sits wholly inside the window, and wastes
+ * under one scene pixel. Rectangles are read in CSS pixels and compared in device pixels, so the same rule holds at
+ * any device pixel ratio. Chromium lays out in 1/64ths of a CSS pixel, so where the canvas's CSS size is not a whole
+ * number (2176 device pixels at ratio 3) a rectangle edge reads up to that much off.
+ */
 async function expectIntegerScale(page: Page, label: string): Promise<void> {
   const s = await page.evaluate(() => {
     const api = window.__rakeMe!;
     const canvas = document.getElementById("garden-canvas") as HTMLCanvasElement;
     const r = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio;
     return {
       fb: api.fbSize(),
       backing: { w: canvas.width, h: canvas.height },
-      rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height },
-      win: { w: window.innerWidth, h: window.innerHeight },
+      rect: { left: r.left * dpr, top: r.top * dpr, right: r.right * dpr, bottom: r.bottom * dpr, width: r.width * dpr, height: r.height * dpr },
+      win: { w: window.innerWidth * dpr, h: window.innerHeight * dpr },
+      // one layout unit, in device pixels; nothing at ratio 1, where every edge is a whole CSS pixel
+      slack: dpr === 1 ? 1e-9 : dpr / 64 + 1e-9,
     };
   });
+  const whole = (v: number): boolean => Math.abs(v - Math.round(v)) <= s.slack;
   expect(Number.isInteger(s.fb.scale) && s.fb.scale >= 1, label).toBe(true);
   expect(s.backing, label).toEqual({ w: s.fb.fbW * s.fb.scale, h: s.fb.fbH * s.fb.scale });
-  expect(s.rect.width, label).toBe(s.fb.fbW * s.fb.scale);
-  expect(s.rect.height, label).toBe(s.fb.fbH * s.fb.scale);
-  // nothing is cropped: the canvas lies inside the window on whole pixels
-  expect(Number.isInteger(s.rect.left) && Number.isInteger(s.rect.top), label).toBe(true);
-  expect(s.rect.left, label).toBeGreaterThanOrEqual(0);
-  expect(s.rect.top, label).toBeGreaterThanOrEqual(0);
-  expect(s.rect.right, label).toBeLessThanOrEqual(s.win.w);
-  expect(s.rect.bottom, label).toBeLessThanOrEqual(s.win.h);
+  expect(Math.abs(s.rect.width - s.fb.fbW * s.fb.scale), `${label}: canvas width ${s.rect.width}`).toBeLessThanOrEqual(s.slack);
+  expect(Math.abs(s.rect.height - s.fb.fbH * s.fb.scale), `${label}: canvas height ${s.rect.height}`).toBeLessThanOrEqual(s.slack);
+  // nothing is cropped: the canvas lies inside the window on whole device pixels
+  expect(whole(s.rect.left) && whole(s.rect.top), label).toBe(true);
+  expect(s.rect.left, label).toBeGreaterThanOrEqual(-s.slack);
+  expect(s.rect.top, label).toBeGreaterThanOrEqual(-s.slack);
+  expect(s.rect.right, label).toBeLessThanOrEqual(s.win.w + s.slack);
+  expect(s.rect.bottom, label).toBeLessThanOrEqual(s.win.h + s.slack);
   // and the border left over is thinner than one scene pixel
   expect(s.win.w - s.rect.width, label).toBeLessThan(s.fb.scale);
   expect(s.win.h - s.rect.height, label).toBeLessThan(s.fb.scale);
+}
+
+/**
+ * What reaches the screen is on the device grid: a screenshot at the device's pixel ratio holds the window at
+ * exactly its device size, and an open panel (opaque from edge to edge) is made of flat uiK × uiK squares that
+ * line up with the canvas's bottom-left corner, in a handful of palette colours.
+ *
+ * Only for a canvas whose CSS box is whole CSS pixels. Chromium's emulated pixel ratio snaps a canvas to whole CSS
+ * pixels when it paints, so a canvas 2176 device pixels wide at ratio 3 (725.33 CSS pixels) is stretched to 2178
+ * in a screenshot here; a phone's own browser snaps to device pixels and has no such stretch to test for.
+ */
+async function expectDeviceGrid(page: Page, label: string): Promise<void> {
+  const g = await page.evaluate(() => {
+    const api = window.__rakeMe!;
+    api.openPanel("settings", "look");
+    const fb = api.fbSize();
+    const canvas = document.getElementById("garden-canvas") as HTMLCanvasElement;
+    const r = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio;
+    const box = api.overlayHits().find((h) => h.action.type === "none")!;
+    return {
+      dpr,
+      uiK: Math.round(fb.uiScale * fb.scale),
+      left: Math.round(r.left * dpr),
+      top: Math.round(r.top * dpr),
+      height: canvas.height,
+      // the panel in device pixels, relative to the canvas (hit rectangles are fractional framebuffer pixels)
+      panel: { x: Math.round(box.x * fb.scale), y: Math.round(box.y * fb.scale), w: Math.round(box.w * fb.scale), h: Math.round(box.h * fb.scale) },
+    };
+  });
+  const png = await page.screenshot({ scale: "device" });
+  const grid = await page.evaluate(
+    async ({ b64, g }) => {
+      const img = new Image();
+      img.src = `data:image/png;base64,${b64}`;
+      await img.decode();
+      const c = document.createElement("canvas");
+      c.width = img.width;
+      c.height = img.height;
+      const ctx = c.getContext("2d")!;
+      ctx.drawImage(img, 0, 0);
+      const { x, y, w, h } = g.panel;
+      const px = ctx.getImageData(g.left + x, g.top + y, w, h).data;
+      const at = (i: number, j: number): number => (px[(j * w + i) * 4]! << 16) | (px[(j * w + i) * 4 + 1]! << 8) | px[(j * w + i) * 4 + 2]!;
+      let bad = 0;
+      const seen = new Set<number>();
+      for (let j = 0; j < h; j++) {
+        // rows are counted from the canvas's bottom edge, where the overlay is anchored
+        const fromBottom = g.height - 1 - (y + j);
+        const cellTop = j - (g.uiK - 1 - (fromBottom % g.uiK));
+        for (let i = 0; i < w; i++) {
+          const cellLeft = i - ((x + i) % g.uiK);
+          if (at(i, j) !== at(Math.max(0, cellLeft), Math.max(0, cellTop))) bad++;
+          seen.add(at(i, j));
+        }
+      }
+      return { bad, colours: seen.size, shot: [img.width, img.height] };
+    },
+    { b64: png.toString("base64"), g },
+  );
+  await page.evaluate(() => window.__rakeMe!.openPanel("none"));
+  const vp = page.viewportSize()!;
+  expect(grid.shot, `${label}: screenshot in device pixels`).toEqual([Math.round(vp.width * g.dpr), Math.round(vp.height * g.dpr)]);
+  expect(g.panel.x % g.uiK, `${label}: panel on the overlay's grid`).toBe(0);
+  expect((g.height - g.panel.y - g.panel.h) % g.uiK, `${label}: panel on the overlay's grid`).toBe(0);
+  // paper, ink and the three woods of the rails
+  expect(grid.colours, `${label}: panel colours`).toBeGreaterThanOrEqual(4);
+  expect(grid.colours, `${label}: panel colours`).toBeLessThanOrEqual(6);
+  expect(grid.bad, `${label}: panel pixels off the ${g.uiK}-device-pixel grid`).toBe(0);
 }
 
 interface Bounds {
@@ -156,7 +255,7 @@ async function expectOverlayTidy(page: Page, label: string): Promise<void> {
       api.openPanel("settings", tab);
       const hits = check(`settings/${tab}`);
       counts[`tabs:${tab}`] = hits.filter((h) => h.action.type === "tab").length;
-      counts[tab] = hits.filter((h) => ["settings", "preset", "watch", "export"].includes(h.action.type)).length;
+      counts[tab] = hits.filter((h) => ["settings", "preset", "watch", "gubba_mode", "export"].includes(h.action.type)).length;
     }
     api.openPanel("basket");
     counts.basket = check("basket").filter((h) => h.action.type === "place").length;
@@ -174,8 +273,8 @@ async function expectOverlayTidy(page: Page, label: string): Promise<void> {
 
 /**
  * The controls are sized for the window, not for the scene's pixels (DESIGN.md 2.7): a HUD object is 6–14 % of the
- * window's shorter side, the overlay's pixels are whole device pixels no finer than the scene's, and what the
- * present pass draws is what a real click hits.
+ * window's shorter side, or a thumb's width where that is larger; the overlay's pixels are whole device pixels no
+ * finer than the scene's; and what the present pass draws is what a real click hits.
  */
 async function expectControlsSized(page: Page, label: string): Promise<void> {
   const m = await page.evaluate(() => {
@@ -200,7 +299,8 @@ async function expectControlsSized(page: Page, label: string): Promise<void> {
   for (const [w, h] of m.sides) {
     expect(w, `${label}: HUD object is square`).toBeCloseTo(h!, 6);
     expect(w! / m.short, `${label}: HUD object ${w} CSS px of ${m.short}`).toBeGreaterThanOrEqual(0.06);
-    expect(w! / m.short, `${label}: HUD object ${w} CSS px of ${m.short}`).toBeLessThanOrEqual(0.14);
+    // the thumb size is the smallest whole overlay pixel that reaches THUMB_CSS: under one device pixel per pixel more
+    expect(w!, `${label}: HUD object ${w} CSS px of ${m.short}`).toBeLessThanOrEqual(Math.max(0.14 * m.short, THUMB_CSS + 16 / m.dpr) + 1e-6);
   }
 
   // a real click on the menu object, where its hit rectangle says it is, opens the menu scroll
@@ -227,6 +327,7 @@ async function expectControlsSized(page: Page, label: string): Promise<void> {
 /** The whole playable contract for the window the page is currently in. */
 async function expectPlayable(page: Page, vp: Viewport): Promise<void> {
   const tag = `${vp.width}x${vp.height}`;
+  const shot = vp.shot ?? tag;
   expect(await page.locator("#rotate-prompt").isHidden(), `${tag}: rotate prompt`).toBe(true);
   expect((await page.evaluate(() => window.__rakeMe!.state())).rotateBlocked, tag).toBe(false);
 
@@ -306,7 +407,7 @@ async function expectPlayable(page: Page, vp: Viewport): Promise<void> {
   await page.mouse.up();
   expect(await page.evaluate(() => window.__rakeMe!.sandHash()), `${tag} cozy raking`).not.toBe(drag.hash);
 
-  if (SCREENSHOTS.has(tag)) await page.screenshot({ path: `test-results/viewport-${tag}.png` });
+  if (SCREENSHOTS.has(shot)) await page.screenshot({ path: `test-results/viewport-${shot}.png` });
 
   // ---- Gubba Porch: Gubba whole, in every variant
   for (const variant of VARIANTS) {
@@ -320,7 +421,7 @@ async function expectPlayable(page: Page, vp: Viewport): Promise<void> {
     expectInsideFrame(b.bounds.gubba, fb, `${tag} porch Gubba (${variant})`);
     expect(await pickInside(page, b.bounds.gubba!, "gubba"), `${tag} porch pick Gubba (${variant})`).toBe(true);
   }
-  if (SCREENSHOTS.has(tag)) await page.screenshot({ path: `test-results/viewport-${tag}-porch.png` });
+  if (SCREENSHOTS.has(shot)) await page.screenshot({ path: `test-results/viewport-${shot}-porch.png` });
   await page.evaluate(() => window.__rakeMe!.setGubbaVariant("moss"));
 
   // ---- Top-Down: the whole bed, and its front-left corner not under the HUD
@@ -345,7 +446,7 @@ async function expectPlayable(page: Page, vp: Viewport): Promise<void> {
   const hudTop = Math.min(...top.hud.map((h) => h.y));
   const frontLeft = top.corners[3]!;
   expect(frontLeft.x >= hudRight || frontLeft.y <= hudTop, `${tag} topdown: sand corner ${JSON.stringify(frontLeft)} under the HUD`).toBe(true);
-  if (SCREENSHOTS.has(tag)) await page.screenshot({ path: `test-results/viewport-${tag}-topdown.png` });
+  if (SCREENSHOTS.has(shot)) await page.screenshot({ path: `test-results/viewport-${shot}-topdown.png` });
 
   // ---- Overlay in both densities, from the default camera
   await page.evaluate(() => window.__rakeMe!.setCamera("cozy"));
@@ -361,9 +462,9 @@ async function expectPlayable(page: Page, vp: Viewport): Promise<void> {
       expectInsideFrame(chunky.bounds.basket, chunky.fb, `${tag} chunky basket`);
       expectInsideFrame(chunky.bounds["rake:hoki"], chunky.fb, `${tag} chunky rake hoki`);
       expectInsideFrame(chunky.bounds["rake:onami"], chunky.fb, `${tag} chunky rake onami`);
-      if (SCREENSHOTS.has(tag)) {
+      if (SCREENSHOTS.has(shot)) {
         await page.evaluate(() => window.__rakeMe!.openPanel("settings", "look"));
-        await page.screenshot({ path: `test-results/viewport-${tag}-chunky-settings.png` });
+        await page.screenshot({ path: `test-results/viewport-${shot}-chunky-settings.png` });
         await page.evaluate(() => window.__rakeMe!.openPanel("none"));
       }
     }
@@ -437,6 +538,98 @@ test.describe("a real phone: touch input at device pixel ratio 3", () => {
     expect(errors).toEqual([]);
   });
 });
+
+for (const vp of PHONES) {
+  test.describe(`a phone on its side at its own pixel ratio: ${vp.width}x${vp.height} @${vp.dpr}x (${vp.name})`, () => {
+    test.describe.configure({ timeout: 120_000 });
+    test.use({ viewport: { width: vp.width, height: vp.height }, deviceScaleFactor: vp.dpr });
+
+    test(`${vp.width}x${vp.height} @${vp.dpr}x: the controls are thumb-sized, panels open whole ${vp.panels} the HUD, and the garden stays framed`, async ({ page }) => {
+      const errors = watchErrors(page);
+      const tag = `${vp.width}x${vp.height}`;
+      const shot = vp.shot ?? tag;
+      await open(page, vp);
+      await page.locator("#title-card").click();
+      expect(await page.evaluate(() => window.devicePixelRatio)).toBe(vp.dpr);
+
+      // the whole playable contract: framing in all three cameras, overlay complete in both densities
+      await expectPlayable(page, vp);
+
+      // every HUD object is a thumb's width, and the speech scroll keeps its 172 overlay pixels beside the block
+      const m = await page.evaluate(() => {
+        const api = window.__rakeMe!;
+        api.setDensity("crisp");
+        api.setCamera("cozy");
+        api.openPanel("none");
+        const fb = api.fbSize();
+        const rect = document.getElementById("garden-canvas")!.getBoundingClientRect();
+        const css = rect.width / fb.fbW;
+        const hud = api.overlayHits().filter((h) => h.action.type === "hud");
+        return {
+          fb,
+          wholeCss: [rect.left, rect.top, rect.width, rect.height].every((v) => Number.isInteger(v)),
+          sides: hud.map((h) => h.w * css),
+          hudRight: Math.max(...hud.map((h) => h.x + h.w)),
+          hudTop: Math.min(...hud.map((h) => h.y)),
+          scroll: api.speechRect(),
+        };
+      });
+      for (const side of m.sides) expect(side, `${tag}: HUD object in CSS pixels`).toBeGreaterThanOrEqual(THUMB_CSS - 1e-6);
+      expect(m.fb.uiScale, `${tag}: overlay scale`).toBeGreaterThan(1);
+      expect(m.scroll.w / m.fb.uiScale, `${tag}: speech scroll width`).toBeCloseTo(172, 6);
+      expect(m.scroll.x, `${tag}: speech scroll beside the HUD`).toBeGreaterThanOrEqual(m.hudRight);
+
+      // each panel opens whole: above the HUD where there is room, to its right from the top of the window where not
+      for (const [panel, tab] of [["settings", "look"], ["settings", "garden"], ["settings", "sound"], ["settings", "presets"], ["basket", "look"]] as const) {
+        const p = await page.evaluate(
+          ({ panel, tab }) => {
+            const api = window.__rakeMe!;
+            api.openPanel(panel, tab);
+            const box = api.overlayHits().find((h) => h.action.type === "none")!;
+            return { x: box.x, y: box.y, w: box.w, h: box.h, violations: api.paletteViolations() };
+          },
+          { panel, tab },
+        );
+        const where = `${tag} ${panel}/${tab}`;
+        expect(p.violations, where).toBe(0);
+        expect(p.y, where).toBeCloseTo(3 * m.fb.uiScale + ((m.fb.fbH * m.fb.scale) % Math.round(m.fb.uiScale * m.fb.scale)) / m.fb.scale, 6);
+        if (vp.panels === "beside") {
+          expect(p.x, `${where}: right of the HUD`).toBeCloseTo(m.hudRight + 3 * m.fb.uiScale, 6);
+          expect(p.x + p.w, where).toBeLessThanOrEqual(m.fb.fbW - 3 * m.fb.uiScale + 1e-6);
+          expect(p.y + p.h, where).toBeLessThanOrEqual(m.fb.fbH - 3 * m.fb.uiScale + 1e-6);
+        } else {
+          expect(p.x, `${where}: from the left margin`).toBeCloseTo(3 * m.fb.uiScale, 6);
+          expect(p.y + p.h, `${where}: above the HUD`).toBeLessThanOrEqual(m.hudTop + 1e-6);
+        }
+        const suffix = panel === "basket" ? "basket" : tab === "look" ? "settings" : `settings-${tab}`;
+        await page.screenshot({ path: `test-results/viewport-${shot}-${suffix}.png` });
+      }
+
+      // a real click on a chip in the panel lands on it: Top-Down on the Look tab
+      const chip = await page.evaluate(() => {
+        const api = window.__rakeMe!;
+        api.openPanel("settings", "look");
+        const { fbW } = api.fbSize();
+        const rect = document.getElementById("garden-canvas")!.getBoundingClientRect();
+        const css = rect.width / fbW;
+        const h = api.overlayHits().find((x) => x.action.type === "settings" && (x.action as { patch: { cameraPreset?: string } }).patch.cameraPreset === "topdown")!;
+        return { x: rect.left + (h.x + h.w / 2) * css, y: rect.top + (h.y + h.h / 2) * css, h: h.h * css };
+      });
+      expect(chip.h, `${tag}: a chip's height in CSS pixels`).toBeGreaterThanOrEqual(24);
+      await page.mouse.click(chip.x, chip.y);
+      expect(await page.evaluate(() => window.__rakeMe!.state().settings.cameraPreset), `${tag}: click on the Top-Down chip`).toBe("topdown");
+      await page.evaluate(() => {
+        window.__rakeMe!.setCamera("cozy");
+        window.__rakeMe!.openPanel("none");
+      });
+
+      // on screen, an overlay pixel is one flat square of whole device pixels (where the emulation can show it)
+      expect(m.wholeCss, `${tag}: canvas CSS box is whole pixels`).toBe(vp.dpr === 1 || (vp.width === 844 && vp.height === 390));
+      if (m.wholeCss) await expectDeviceGrid(page, tag);
+      expect(errors).toEqual([]);
+    });
+  });
+}
 
 test.describe("popular viewports: the whole garden stays on screen", () => {
   test.describe.configure({ timeout: 120_000 });

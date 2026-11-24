@@ -10,10 +10,16 @@ export function sweepFront(elapsedMs: number, y: number): number {
   return -8 + (SAND_W + 16) * ease + 4 * Math.sin(Math.PI * y / SAND_H);
 }
 
-export function applySweep(grid: SandGrid, prevMs: number, nextMs: number): SandRect | null {
+/** `dirty` may be a rectangle to reuse, so a caller that sweeps every frame allocates nothing. */
+export function applySweep(
+  grid: SandGrid,
+  prevMs: number,
+  nextMs: number,
+  dirty: SandRect = { x: 0, y: 0, w: 0, h: 0 },
+): SandRect | null {
   if (nextMs <= prevMs) return null;
 
-  const dirty = { x: 0, y: 0, w: 0, h: 0 };
+  dirty.x = dirty.y = dirty.w = dirty.h = 0;
   for (let y = 0; y < grid.h; y++) {
     const first = Math.max(0, Math.floor(sweepFront(prevMs, y + 0.5) + 0.5));
     const end = Math.min(grid.w, Math.floor(sweepFront(nextMs, y + 0.5) + 0.5));

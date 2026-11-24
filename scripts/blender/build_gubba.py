@@ -89,6 +89,27 @@ def _add_eye_assembly(
     objs.extend([eye_obj, pupil_obj, lid_obj])
 
 
+def _add_cushion(
+    scene: bpy.types.Scene,
+    parts: list[dict[str, Any]],
+    variant: str,
+) -> bpy.types.Object:
+    """Zabuton as a top-level sibling of `Root` (never a child of it), in the same rest
+    coordinates it had when it was baked into `Body`. Smooth-shaded like `Body` was, so the
+    seated pose renders exactly as before."""
+    return build_mesh_obj(
+        scene,
+        "Cushion",
+        parts,
+        ["warm"],
+        smooth=True,
+        parent=None,
+        location=(0, 0, 0),
+        extras={"part": "gubba_cushion"},
+        gubba_variant=variant,
+    )
+
+
 def build_gubba_moss(scene: bpy.types.Scene) -> list[bpy.types.Object]:
     """Concept A — Moss Yabba: sprawling mound on undersized cushion + crooked head bonsai."""
     variant = "moss"
@@ -96,11 +117,21 @@ def build_gubba_moss(scene: bpy.types.Scene) -> list[bpy.types.Object]:
     root = make_empty(scene, "Root", (0, 0, 0), extras={"part": "gubba"})
     objs.append(root)
 
+    # Undersized zabuton cushion + tassel: its own top-level node, so it stays on the porch
+    # when Root walks off onto the sand.
+    objs.append(
+        _add_cushion(
+            scene,
+            [
+                {"kind": "box", "size": (30, 3, 25), "center": (1, 1.5, 0), "rot": (0, 0.22, 0), "mat": 0},
+                {"kind": "ell", "radii": (1.2, 1.2, 1.2), "center": (-15.5, 1.2, 14.5), "seg": 5, "rings": 3, "mat": 0},
+            ],
+            variant,
+        )
+    )
+
     # Body node (pivot at floor centre)
     body_parts: list[dict[str, Any]] = [
-        # Undersized zabuton cushion + tassel
-        {"kind": "box", "size": (30, 3, 25), "center": (1, 1.5, 0), "rot": (0, 0.22, 0), "mat": 3},
-        {"kind": "ell", "radii": (1.2, 1.2, 1.2), "center": (-15.5, 1.2, 14.5), "seg": 5, "rings": 3, "mat": 3},
         # Sprawling lower mound & shoulders
         {"kind": "ell", "radii": (20.0, 11.0, 16.0), "center": (0, 9.5, 0), "seg": 12, "rings": 7, "mat": 0},
         {"kind": "ell", "radii": (17.5, 8.0, 14.0), "center": (0, 17.0, 0.5), "seg": 10, "rings": 6, "mat": 0},
@@ -117,7 +148,7 @@ def build_gubba_moss(scene: bpy.types.Scene) -> list[bpy.types.Object]:
         scene,
         "Body",
         body_parts,
-        ["gubba", "belly", "leaf", "warm"],
+        ["gubba", "belly", "leaf"],
         smooth=True,
         parent=root,
         location=(0, 0, 0),
@@ -280,8 +311,16 @@ def build_gubba_kasa(scene: bpy.types.Scene) -> list[bpy.types.Object]:
     root = make_empty(scene, "Root", (0, 0, 0), extras={"part": "gubba"})
     objs.append(root)
 
+    # Zabuton cushion: its own top-level node, so it stays on the porch when Root walks off.
+    objs.append(
+        _add_cushion(
+            scene,
+            [{"kind": "box", "size": (26, 3, 22), "center": (0, 1.5, 0), "rot": (0, -0.18, 0), "mat": 0}],
+            variant,
+        )
+    )
+
     body_parts: list[dict[str, Any]] = [
-        {"kind": "box", "size": (26, 3, 22), "center": (0, 1.5, 0), "rot": (0, -0.18, 0), "mat": 3},
         {"kind": "ell", "radii": (16.0, 12.0, 14.0), "center": (0, 11.5, 0), "seg": 12, "rings": 7, "mat": 0},
         {"kind": "ell", "radii": (11.0, 8.6, 5.0), "center": (0, 9.2, 10.2), "seg": 10, "rings": 6, "mat": 1},
         # Tight indigo sash + knot
@@ -293,7 +332,7 @@ def build_gubba_kasa(scene: bpy.types.Scene) -> list[bpy.types.Object]:
         scene,
         "Body",
         body_parts,
-        ["gubba", "belly", "water", "warm"],
+        ["gubba", "belly", "water"],
         smooth=True,
         parent=root,
         location=(0, 0, 0),

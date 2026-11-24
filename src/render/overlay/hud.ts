@@ -121,24 +121,44 @@ export function scrollRect(w: number, h: number): { x: number; y: number; w: num
   return { x: HUD_LEFT, y: h - HUD_FROM_BOTTOM - SCROLL_H - 2, w: Math.max(24, Math.min(SCROLL_MAX_W, w - 6)), h: SCROLL_H };
 }
 
-/** Draws the speech scroll with up to three lines of ink-on-paper text. Returns its rectangle. */
-export function drawScroll(L: PixelLayer, text: string, fbW: number, fbH: number): { x: number; y: number; w: number; h: number } {
+/** Rows between the tops of two lines of scroll text. */
+const SCROLL_LINE_H = 9;
+
+/** Height of a scroll fitted to `lines` lines of text: 14, 23 or the full 32 rows. */
+export function fittedScrollHeight(lines: number): number {
+  return SCROLL_H - (SCROLL_LINES - Math.max(1, Math.min(SCROLL_LINES, lines))) * SCROLL_LINE_H;
+}
+
+/**
+ * Draws the speech scroll with up to three lines of ink-on-paper text and returns the rectangle it may take
+ * (`scrollRect`). It fills that rectangle with the text centred, as the reference does. With `fitted` it is only
+ * as tall as its lines and rests on the rectangle's bottom edge: on a short canvas, where the controls are sized
+ * for a thumb, a full scroll would cover the front of the sand for a line of five words.
+ */
+export function drawScroll(
+  L: PixelLayer,
+  text: string,
+  fbW: number,
+  fbH: number,
+  fitted = false,
+): { x: number; y: number; w: number; h: number } {
   const r = scrollRect(fbW, fbH);
   const sw = r.w;
   const x0 = r.x;
-  const y0 = r.y;
   const lines = wrapText(text, sw - 14).slice(0, SCROLL_LINES);
-  L.rect(x0 + 2, y0 + 1, sw - 4, 30, S.paper);
+  const sh = fitted ? fittedScrollHeight(lines.length) : SCROLL_H;
+  const y0 = r.y + SCROLL_H - sh;
+  L.rect(x0 + 2, y0 + 1, sw - 4, sh - 2, S.paper);
   L.hline(x0 + 2, x0 + sw - 3, y0 + 1, S.wood1);
-  L.hline(x0 + 2, x0 + sw - 3, y0 + 30, S.wood1);
+  L.hline(x0 + 2, x0 + sw - 3, y0 + sh - 2, S.wood1);
   for (const x of [x0, x0 + sw - 2]) {
-    L.rect(x, y0, 2, SCROLL_H, S.wood3);
-    L.vline(x + 1, y0, y0 + 31, S.wood2);
+    L.rect(x, y0, 2, sh, S.wood3);
+    L.vline(x + 1, y0, y0 + sh - 1, S.wood2);
     L.hline(x, x + 1, y0, S.ink);
-    L.hline(x, x + 1, y0 + 31, S.ink);
+    L.hline(x, x + 1, y0 + sh - 1, S.ink);
   }
-  const ty = y0 + 3 + Math.floor((SCROLL_LINES - lines.length) * 4.5);
-  lines.forEach((ln, i) => drawText(L, x0 + 6, ty + 1 + i * 9, ln, S.ink));
+  const ty = y0 + 3 + (fitted ? 0 : Math.floor((SCROLL_LINES - lines.length) * (SCROLL_LINE_H / 2)));
+  lines.forEach((ln, i) => drawText(L, x0 + 6, ty + 1 + i * SCROLL_LINE_H, ln, S.ink));
   return r;
 }
 

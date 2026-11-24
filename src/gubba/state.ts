@@ -48,6 +48,8 @@ const CUE_MS = 1400;
 /** Wake-up blink: start it half way through so the lids are shut now and open over 140 ms. */
 const WAKE_BLINK_BACKDATE_MS = 140;
 const IDLE_ANIM_START = -100_000;
+/** Back on the cushion with a garden finished, the tea comes this soon. */
+export const AUTO_SIP_DELAY_MS = 2500;
 
 export interface CreateGubbaOptions {
   /** The clock reading at creation. Default 0. */
@@ -212,10 +214,13 @@ function cueForPhase(phase: BreathPhase): string {
 
 function onTick(g: GubbaState, e: Extract<GubbaEvent, { type: "tick" }>, nowMs: number): void {
   g.rain = e.rain;
-  if (e.raking || e.pointerOnWall) markInput(g, nowMs);
-  g.watchingRake = e.raking;
-  g.glancingWall = e.pointerOnWall && !e.raking;
-  if (e.raking && e.rakeGridPos) g.targetYaw = yawForRake(e.rakeGridPos.x);
+  // Up and raking himself, he is busy: awake, not sipping, and with no one else's rake to follow
+  const working = e.working === true;
+  if (e.raking || e.pointerOnWall || working) markInput(g, nowMs);
+  g.watchingRake = e.raking && !working;
+  g.glancingWall = e.pointerOnWall && !e.raking && !working;
+  if (working) g.targetYaw = 0;
+  else if (e.raking && e.rakeGridPos) g.targetYaw = yawForRake(e.rakeGridPos.x);
   else if (g.glancingWall) g.targetYaw = WALL_YAW;
   else g.targetYaw = 0;
 
@@ -229,7 +234,7 @@ function onTick(g: GubbaState, e: Extract<GubbaEvent, { type: "tick" }>, nowMs: 
     g.nextBlinkMs = nowMs + range(g, 3000, 7000);
   }
   if (nowMs >= g.nextSipMs) {
-    if (!g.dozing) g.sipStartMs = nowMs;
+    if (!g.dozing && !working) g.sipStartMs = nowMs;
     g.nextSipMs = nowMs + range(g, 40_000, 90_000);
   }
   if (nowMs >= g.nextTailFlickMs) {
@@ -342,6 +347,19 @@ export function stepGubbaInPlace(g: GubbaState, e: GubbaEvent, nowMs: number): G
     case "first_visit":
       markInput(g, nowMs);
       if (g.talkMode !== "quiet") speak(g, FIRST_VISIT_LINE, nowMs, true);
+      break;
+    case "auto_start":
+      markInput(g, nowMs);
+      react(g, linesForTag("auto_start"), nowMs);
+      break;
+    case "auto_done":
+      markInput(g, nowMs);
+      react(g, linesForTag("auto_done"), nowMs);
+      g.nextSipMs = nowMs + AUTO_SIP_DELAY_MS;
+      break;
+    case "auto_yield":
+      markInput(g, nowMs);
+      react(g, linesForTag("auto_yield"), nowMs);
       break;
   }
   return g;

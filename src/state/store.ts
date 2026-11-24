@@ -6,6 +6,8 @@ import { DEFAULT_SETTINGS, ELEMENT_FOOTPRINTS } from "./types.ts";
 import type { ElementInstance, GardenState, PresetId, SettingsState } from "./types.ts";
 import { cloneGarden, UndoStack } from "./undo.ts";
 
+export type GardenStore = ReturnType<typeof createGardenStore>;
+
 export function createGardenStore(
   garden: GardenState = createOpeningGarden(),
   settings: SettingsState = DEFAULT_SETTINGS,
@@ -35,7 +37,8 @@ export function createGardenStore(
     }
   }
 
-  function editElement(id: string, replacement?: ElementInstance): boolean {
+  /** `record` false leaves the undo history alone: Gubba's own edits are committed once, by the caller. */
+  function editElement(id: string, replacement?: ElementInstance, record = true): boolean {
     const index = state.elements.findIndex(element => element.id === id);
     const previous = state.elements[index];
     if (replacement) {
@@ -44,7 +47,7 @@ export function createGardenStore(
       return false;
     }
 
-    const before = cloneGarden(state);
+    const before = record ? cloneGarden(state) : null;
     // Level the old and new impressions before marking the new footprint.
     if (previous) {
       state.elements.splice(index, 1);
@@ -56,8 +59,15 @@ export function createGardenStore(
       state.elements.splice(previous ? index : state.elements.length, 0, replacement);
     }
     rebuildRockMask(state.sand, state.elements);
-    history.pushSnapshot(before, state);
+    if (before) history.pushSnapshot(before, state);
     return true;
+  }
+
+  function normalized(element: ElementInstance): ElementInstance | null {
+    if (state.elements.some(placed => placed.id === element.id)
+      || !Object.hasOwn(ELEMENT_FOOTPRINTS, element.kind)) return null;
+    const { rx, ry } = ELEMENT_FOOTPRINTS[element.kind];
+    return { ...element, x: Math.round(element.x), y: Math.round(element.y), rx, ry };
   }
 
   return {
@@ -81,10 +91,8 @@ export function createGardenStore(
       return true;
     },
     placeElement(element: ElementInstance): boolean {
-      if (state.elements.some(placed => placed.id === element.id)
-        || !Object.hasOwn(ELEMENT_FOOTPRINTS, element.kind)) return false;
-      const { rx, ry } = ELEMENT_FOOTPRINTS[element.kind];
-      return editElement(element.id, { ...element, x: Math.round(element.x), y: Math.round(element.y), rx, ry });
+      const next = normalized(element);
+      return next !== null && editElement(element.id, next);
     },
     moveElement(id: string, x: number, y: number): boolean {
       const previous = state.elements.find(element => element.id === id);
@@ -94,6 +102,14 @@ export function createGardenStore(
       return editElement(id, next);
     },
     removeElement: (id: string) => editElement(id),
+    /** The same edits without an undo entry each (Gubba mode): the caller commits one snapshot for the run. */
+    silent: {
+      place(element: ElementInstance): boolean {
+        const next = normalized(element);
+        return next !== null && editElement(element.id, next, false);
+      },
+      remove: (id: string) => editElement(id, undefined, false),
+    },
   };
 }
 

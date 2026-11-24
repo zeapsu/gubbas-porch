@@ -48,9 +48,29 @@ import { SandMesh } from "./sandMesh.ts";
 
 export const MAX_ELEMENTS = 12;
 const GHOST_SLOT = MAX_ELEMENTS;
+/** The stone in Gubba's arms rides in the element model's last node, so carrying one adds no draw call. */
+const CARRY_SLOT = MAX_ELEMENTS + 1;
+const ELEMENT_SLOTS = MAX_ELEMENTS + 2;
+/** Height of a rake's handle axis above its tine tips, in the rake's own frame. */
+const HANDLE_Y = 5.2;
+const ON_RACK = 0;
+const IN_HAND = 1;
+const WITH_GUBBA = 2;
 const RAKE_TRAVEL_MS = 350;
 const RAKE_BOUNCE_MS = 200;
 const SHISHI_PERIOD_MS = 9000;
+
+/** What Gubba holds while he is up and raking (Gubba mode); world coordinates. */
+export interface GardenAutoFrame {
+  /** The rake in his hands, or null. It is posed with its tines at `tip` and its handle through `grip`. */
+  rake: RakeId | null;
+  tip: Vec3;
+  grip: Vec3;
+  /** The stone in his arms, or null, with where it is and how it is turned. */
+  carried: ElementKind | null;
+  carriedPos: Vec3;
+  carriedYaw: number;
+}
 
 /** Everything the scene needs from the rest of the game for one frame. */
 export interface GardenFrame {
@@ -84,6 +104,8 @@ export interface GardenFrame {
   rain: boolean;
   /** The element being placed from the basket, following the pointer (grid coordinates). */
   placing: { kind: ElementKind; x: number; y: number; rotation: number } | null;
+  /** Gubba's rake and carried stone while he works the garden himself, or null. */
+  auto: GardenAutoFrame | null;
 }
 
 type PickInfo =
@@ -177,7 +199,8 @@ interface RakeAnim {
   id: RakeId;
   index: number;
   lift: number;
-  inHand: boolean;
+  /** ON_RACK, IN_HAND (the player's) or WITH_GUBBA. */
+  where: number;
   t0: number;
   fromPos: Vector3;
   fromQuat: Quaternion;
@@ -219,6 +242,7 @@ export class GardenScene {
   private readonly rakeModel: RigidModel;
   private readonly rakes: RakeAnim[] = [];
   private heldRake: RakeId | null = null;
+  private gubbaRake: RakeId | null = null;
   private readonly headGrid = { x: 96, y: 86 };
 
   private readonly gubbas: GubbaModel[] = [];
@@ -316,7 +340,7 @@ export class GardenScene {
         id,
         index,
         lift: 0,
-        inHand: false,
+        where: ON_RACK,
         t0: -1e9,
         fromPos: new Vector3(),
         fromQuat: new Quaternion(),
@@ -344,17 +368,34 @@ export class GardenScene {
     quat.setFromEuler(_e.set(-(f.raking ? 0.62 : 0.5), Math.atan2(-Math.cos(h), -Math.sin(h)), 0, "YZX"));
   }
 
+  /**
+   * In Gubba's hands: tine tips at `tip`, the handle passing through his grip. The handle axis sits `HANDLE_Y`
+   * above the tips, so the pitch is the tip-to-grip slope less the angle that offset subtends.
+   */
+  private gubbaPose(auto: GardenAutoFrame, pos: Vector3, quat: Quaternion): void {
+    const dx = auto.grip.x - auto.tip.x;
+    const dy = auto.grip.y - auto.tip.y;
+    const dz = auto.grip.z - auto.tip.z;
+    const flat = Math.hypot(dx, dz);
+    const along = Math.sqrt(Math.max(1, flat * flat + dy * dy - HANDLE_Y * HANDLE_Y));
+    const pitch = Math.atan2(dy, flat) - Math.atan2(HANDLE_Y, along);
+    pos.set(auto.tip.x, auto.tip.y, auto.tip.z);
+    quat.setFromEuler(_e.set(-pitch, Math.atan2(dx, dz), 0, "YZX"));
+  }
+
   private updateRakes(f: GardenFrame): void {
     if (f.rakeHead) {
       this.headGrid.x = f.rakeHead.x;
       this.headGrid.y = f.rakeHead.y;
     }
     const held = f.heldRake === "hoki" ? null : f.heldRake;
-    if (held !== this.heldRake) {
+    const gubba = f.auto ? f.auto.rake : null;
+    if (held !== this.heldRake || gubba !== this.gubbaRake) {
       for (const a of this.rakes) {
-        const want = a.id === held;
-        if (want !== a.inHand) {
-          a.inHand = want;
+        // a rake both would use goes to Gubba; it flies to the player's hand when he lets go of it
+        const where = a.id === gubba ? WITH_GUBBA : a.id === held ? IN_HAND : ON_RACK;
+        if (where !== a.where) {
+          a.where = where;
           a.t0 = f.timeMs;
           a.fromPos.copy(a.pos);
           a.fromQuat.copy(a.quat);
@@ -362,13 +403,15 @@ export class GardenScene {
         }
       }
       this.heldRake = held;
+      this.gubbaRake = gubba;
     }
     const k = f.reducedMotion ? 1 : 1 - Math.pow(0.72, Math.max(0, f.dtMs) / (1000 / 60));
     for (const a of this.rakes) {
-      const hoverTarget = !a.inHand && f.hoverRake === a.id ? 1 : 0;
+      const hoverTarget = a.where === ON_RACK && f.hoverRake === a.id ? 1 : 0;
       a.lift += (hoverTarget - a.lift) * k;
       if (Math.abs(a.lift - hoverTarget) < 1e-3) a.lift = hoverTarget;
-      if (a.inHand) this.handPose(f, _v, _q);
+      if (a.where === WITH_GUBBA && f.auto) this.gubbaPose(f.auto, _v, _q);
+      else if (a.where === IN_HAND) this.handPose(f, _v, _q);
       else this.rackPose(a, _v, _q);
       const el = f.timeMs - a.t0;
       if (a.travelling && el < RAKE_TRAVEL_MS) {
@@ -379,7 +422,7 @@ export class GardenScene {
       } else {
         a.pos.copy(_v);
         a.quat.copy(_q);
-        if (a.travelling && !a.inHand && el < RAKE_TRAVEL_MS + RAKE_BOUNCE_MS) {
+        if (a.travelling && a.where === ON_RACK && el < RAKE_TRAVEL_MS + RAKE_BOUNCE_MS) {
           const v = (el - RAKE_TRAVEL_MS) / RAKE_BOUNCE_MS;
           a.pos.y += 0.9 * Math.sin(Math.PI * v) * (1 - v); // settles on its pegs with a small bounce
         } else if (el >= RAKE_TRAVEL_MS + RAKE_BOUNCE_MS) a.travelling = false;
@@ -446,7 +489,9 @@ export class GardenScene {
     }
     g.root.updateMatrixWorld(true);
     for (const n of g.nodes) g.model.nodes[n.slot]?.copy(n.obj.matrixWorld);
-    if (g.steam) {
+    // the tea stays on the porch: with the cup put away (Gubba off his cushion) there is nothing to steam
+    const cup = pose ? pose.Cup : undefined;
+    if (g.steam && !(cup && cup.scale.x < 0.999)) {
       _v2.copy(g.steamOffset).applyMatrix4(g.steam.matrixWorld).applyMatrix4(this.gubbaPlace);
       this.steamWorld.x = _v2.x;
       this.steamWorld.y = _v2.y;
@@ -469,29 +514,47 @@ export class GardenScene {
   private updateElements(f: GardenFrame): void {
     this.elements = f.elements;
     const count = Math.min(MAX_ELEMENTS, f.elements.length);
-    let changed = this.elementKinds.length !== MAX_ELEMENTS + 1;
+    const carried = f.auto ? f.auto.carried : null;
+    let changed = this.elementKinds.length !== ELEMENT_SLOTS;
     if (!changed) {
       for (let i = 0; i < MAX_ELEMENTS; i++) if (this.elementKinds[i] !== (i < count ? f.elements[i]?.kind ?? null : null)) changed = true;
       if (this.elementKinds[GHOST_SLOT] !== (f.placing ? f.placing.kind : null)) changed = true;
+      if (this.elementKinds[CARRY_SLOT] !== carried) changed = true;
     }
     if (changed) {
       this.elementKinds = [];
       const b = new GeometryBuilder();
-      for (let i = 0; i <= MAX_ELEMENTS; i++) {
-        const kind = i === GHOST_SLOT ? f.placing?.kind ?? null : i < count ? f.elements[i]?.kind ?? null : null;
+      for (let i = 0; i < ELEMENT_SLOTS; i++) {
+        const kind = i === GHOST_SLOT ? f.placing?.kind ?? null : i === CARRY_SLOT ? carried : i < count ? f.elements[i]?.kind ?? null : null;
         this.elementKinds.push(kind);
         if (!kind) continue;
         for (const m of this.meshesFor(kind)) {
-          const part = i === GHOST_SLOT ? this.parts.id(`ghost:${m.partKey}`, { kind: "none" }) : this.parts.id(`el${i}:${m.partKey}`, { kind: "element", slot: i });
+          // a stone in Gubba's arms is part of Gubba to the pointer: tapping it talks to him
+          const part =
+            i === GHOST_SLOT
+              ? this.parts.id(`ghost:${m.partKey}`, { kind: "none" })
+              : i === CARRY_SLOT
+                ? this.parts.id(`carry:${m.partKey}`, { kind: "gubba" })
+                : this.parts.id(`el${i}:${m.partKey}`, { kind: "element", slot: i });
           b.addMeshInfo(m, m.mesh.matrixWorld, part, 0, i);
         }
       }
       this.elementModel.setGeometry(b.build());
     }
-    for (let i = 0; i <= MAX_ELEMENTS; i++) {
-      const e = i === GHOST_SLOT ? f.placing : i < count ? f.elements[i] : null;
+    for (let i = 0; i < ELEMENT_SLOTS; i++) {
       const node = this.elementModel.nodes[i];
       if (!node) continue;
+      if (i === CARRY_SLOT) {
+        if (!f.auto || !carried) {
+          node.makeScale(0, 0, 0);
+          continue;
+        }
+        _q.setFromEuler(_e.set(0, f.auto.carriedYaw, 0, "YZX"));
+        _v.set(f.auto.carriedPos.x, f.auto.carriedPos.y, f.auto.carriedPos.z);
+        node.compose(_v, _q, _one);
+        continue;
+      }
+      const e = i === GHOST_SLOT ? f.placing : i < count ? f.elements[i] : null;
       if (!e) {
         node.makeScale(0, 0, 0);
         continue;
@@ -567,12 +630,13 @@ export class GardenScene {
     this.particles.points.visible = !on;
   }
 
-  /** Maps a G-buffer part id to what the pointer is over. The rake in the hand does not pick. */
+  /** Maps a G-buffer part id to what the pointer is over. The rake in the hand does not pick; Gubba's rake is Gubba. */
   pickResult(part: number): PickResult {
     const info = this.parts.info[part];
     if (!info) return { kind: "none" };
     switch (info.kind) {
       case "rake":
+        if (info.id === this.gubbaRake) return { kind: "gubba" };
         return info.id === this.heldRake ? { kind: "none" } : { kind: "rake", id: info.id };
       case "gubba":
         return { kind: "gubba" };

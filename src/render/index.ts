@@ -20,9 +20,9 @@ export * from "./pipeline/tone.ts";
 export { RenderPipeline, framebufferFor, SHADOW_MAP_SIZE, SHADOW_RADIUS } from "./pipeline/pipeline.ts";
 export type { FramebufferSize } from "./pipeline/pipeline.ts";
 export { GardenScene, MAX_ELEMENTS } from "./scene/gardenScene.ts";
-export type { GardenFrame } from "./scene/gardenScene.ts";
-export { RACK_ORDER, RACK_SLOTS, MODEL_SPECS } from "./scene/assets.ts";
-export { Overlay, PRESET_LABELS, uiPixelFor } from "./overlay/overlay.ts";
+export type { GardenAutoFrame, GardenFrame } from "./scene/gardenScene.ts";
+export { GUBBA_YAW, HANG_Z, PROP_ORIGINS, RACK_ORDER, RACK_SLOTS, MODEL_SPECS } from "./scene/assets.ts";
+export { Overlay, PRESET_LABELS, TOUCH_MIN_CSS, uiPixelFor } from "./overlay/overlay.ts";
 export type { OverlayAction, OverlayHit, OverlayState, SettingsPatch, SettingsTab, MixChannel } from "./overlay/overlay.ts";
 export type { HudId } from "./overlay/hud.ts";
 export { measureText, wrapText } from "./overlay/font.ts";
@@ -81,7 +81,7 @@ export class RakeRenderer {
     return this.pipeline.scale;
   }
 
-  /** Scene pixels per overlay pixel in the current window: 1 in a landscape window, more in a narrow one. */
+  /** Scene pixels per overlay pixel in the current window: 1 in a desktop landscape window, more in a narrow or small one. */
   get uiScale(): number {
     return this.overlay.scale;
   }
@@ -92,7 +92,8 @@ export class RakeRenderer {
 
   resize(deviceW: number, deviceH: number, density: PixelDensity, devicePixelRatio = 1): FramebufferSize {
     const size = this.pipeline.resize(deviceW, deviceH, density, devicePixelRatio);
-    this.overlay.resize(size.fbW, size.fbH, size.scale, density);
+    // the screen's pixel ratio sizes the controls for a thumb: on a phone the scene's pixels are too small for one
+    this.overlay.resize(size.fbW, size.fbH, size.scale, density, devicePixelRatio);
     this.pipeline.setOverlayGrid(this.overlay.layer.w, this.overlay.layer.h, this.overlay.uiK);
     return size;
   }

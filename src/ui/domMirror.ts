@@ -55,6 +55,8 @@ export interface MirrorView {
   mood: MoodId;
   /** Whether animated preset playback ("Watch Gubba rake") is enabled. */
   watchGubbaRake?: boolean;
+  /** Whether Gubba mode is on: Gubba rakes one garden after another by himself. */
+  gubbaMode?: boolean;
 }
 
 interface ControlDef {
@@ -205,6 +207,13 @@ function buildControls(): ControlDef[] {
     command: { type: "toggle_watch" },
     label: (v) => `Watch Gubba rake presets, ${onOff(Boolean(v.watchGubbaRake))}`,
     pressed: (v) => Boolean(v.watchGubbaRake),
+  });
+  defs.push({
+    id: "gubba-mode",
+    group: "Presets",
+    command: { type: "toggle_gubba_mode" },
+    label: (v) => `Gubba mode, ${onOff(Boolean(v.gubbaMode))}. Gubba rakes one garden after another`,
+    pressed: (v) => Boolean(v.gubbaMode),
   });
   for (const p of PRESETS) {
     defs.push({

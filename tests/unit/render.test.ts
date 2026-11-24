@@ -47,8 +47,8 @@ import {
   toneFor,
 } from "../../src/render/pipeline/tone.ts";
 import { measureText, wrapText } from "../../src/render/overlay/font.ts";
-import { HUD_FROM_BOTTOM, HUD_ICON, HUD_LEFT, scrollRect } from "../../src/render/overlay/hud.ts";
-import { Overlay, uiPixelFor } from "../../src/render/overlay/overlay.ts";
+import { HUD_FROM_BOTTOM, HUD_ICON, HUD_LEFT, fittedScrollHeight, scrollRect } from "../../src/render/overlay/hud.ts";
+import { Overlay, TOUCH_MIN_CSS, uiPixelFor } from "../../src/render/overlay/overlay.ts";
 import type { OverlayAction, OverlayHit, OverlayState } from "../../src/render/overlay/overlay.ts";
 import { GUBBA_YAW, HANG_Y, HANG_Z, PROP_ORIGINS, RACK_ORDER, RACK_SLOTS } from "../../src/render/scene/assets.ts";
 import { DEFAULT_SETTINGS } from "../../src/state/types.ts";
@@ -62,6 +62,7 @@ const BASE_OVERLAY: OverlayState = {
   panel: "none",
   tab: "look",
   watchGubbaRake: false,
+  gubbaMode: false,
   elementCount: 3,
   maxElements: 12,
   pointer: null,
@@ -81,7 +82,9 @@ const VIEWPORTS: readonly (readonly [number, number, string])[] = [
   [768, 1024, "tablet portrait"],
   [640, 720, "split screen"],
   [844, 390, "phone landscape"],
+  [726, 275, "phone landscape inside browser chrome"],
   [667, 375, "small phone landscape"],
+  [667, 260, "small phone landscape inside browser chrome"],
   [568, 320, "smallest phone landscape"],
   [390, 844, "phone portrait"],
   [360, 800, "phone portrait"],
@@ -100,10 +103,15 @@ interface Fb {
   /** Device pixels per scene pixel. */
   scale: number;
   density: PixelDensity;
+  /** Device pixels per CSS pixel. */
+  dpr: number;
   /** Scene pixels per overlay pixel (`uiPixelFor` over `scale`). */
   uiScale: number;
-  /** One HUD object's side as a share of the window's shorter side. */
+  /** One HUD object's side in CSS pixels, and as a share of the window's shorter side. */
+  iconCss: number;
   iconShare: number;
+  /** The window's shorter side in CSS pixels. */
+  short: number;
   label: string;
 }
 
@@ -115,14 +123,17 @@ function framebuffers(playableOnly = false): Fb[] {
     for (const density of DENSITIES) {
       for (const dpr of [1, 2, 3]) {
         const fb = fbFor(w, h, density, dpr);
-        const uiK = uiPixelFor(fb.fbW, fb.fbH, fb.scale, density);
+        const uiK = uiPixelFor(fb.fbW, fb.fbH, fb.scale, density, dpr);
         out.push({
           fbW: fb.fbW,
           fbH: fb.fbH,
           scale: fb.scale,
           density,
+          dpr,
           uiScale: uiK / fb.scale,
+          iconCss: (HUD_ICON * uiK) / dpr,
           iconShare: (HUD_ICON * uiK) / (Math.min(w, h) * dpr),
+          short: Math.min(w, h),
           label: `${name} ${w}×${h} ${density} @${dpr}x → ${fb.fbW}×${fb.fbH}, overlay ×${uiK / fb.scale}`,
         });
       }
@@ -406,7 +417,7 @@ describe("camera rig", () => {
   it("the 16:9 reference views are exactly the presets: nothing is pulled back or panned", () => {
     const pan = (rig: CameraRig, id: CameraPresetId): number =>
       Math.hypot(rig.target.x - CAMERA_PRESETS[id].target.x, rig.target.y - CAMERA_PRESETS[id].target.y, rig.target.z - CAMERA_PRESETS[id].target.z);
-    // 1456×820 at Crisp, then 1920×1080, 1366×768, 1280×720 and two phones on their side
+    // 1456×820 at Crisp, then 1920×1080, 1366×768, 1280×720 and two phone-shaped windows
     for (const [w, h] of [[364, 205], [384, 216], [341, 192], [320, 180], [422, 195], [333, 187]] as const) {
       expect(framedRig("cozy", w, h), `cozy ${w}×${h}`).toEqual(cloneRig(CAMERA_PRESETS.cozy));
       expect(framedRig("porch", w, h), `porch ${w}×${h}`).toEqual(cloneRig(CAMERA_PRESETS.porch));
@@ -447,8 +458,9 @@ describe("camera rig", () => {
   it("the HUD clearance matches the HUD block the overlay draws, at any overlay scale", () => {
     expect(HUD_CLEAR_W).toBe(HUD_LEFT + 3 * HUD_ICON + 1);
     expect(HUD_CLEAR_H).toBe(HUD_FROM_BOTTOM + 1);
-    for (const [w, h, k] of [[364, 205, 4], [384, 512, 2], [320, 360, 2], [341, 256, 3]] as const) {
-      const o = new Overlay(w, h, k, "crisp");
+    // the reference, three narrow windows, then phones on their side at device pixel ratio 3 (844×390, 726×275)
+    for (const [w, h, k, dpr] of [[364, 205, 4, 1], [384, 512, 2, 1], [320, 360, 2, 1], [341, 256, 3, 1], [422, 195, 6, 3], [544, 206, 4, 3]] as const) {
+      const o = new Overlay(w, h, k, "crisp", dpr);
       const hud = o.draw(BASE_OVERLAY).filter((x) => x.action.type === "hud");
       expect(Math.max(...hud.map((x) => x.x + x.w)) + 1, `${w}×${h}`).toBeCloseTo(hudClearWidth(o.scale), 9);
       expect(h - Math.min(...hud.map((x) => x.y)) + 1, `${w}×${h}`).toBeCloseTo(hudClearHeight(o.scale), 9);
@@ -722,6 +734,7 @@ describe("overlay", () => {
     const presets = all.flatMap((a) => (a.type === "preset" ? [a.id] : []));
     expect(new Set(presets)).toEqual(new Set(["still_sand", "three_islands", "ripple_pond", "old_sea", "river_bend", "snails_thought", "checker_field"]));
     expect(all.some((a) => a.type === "watch" && a.on)).toBe(true);
+    for (const on of [true, false]) expect(all.some((a) => a.type === "gubba_mode" && a.on === on), `Gubba mode ${on}`).toBe(true);
     expect(all.some((a) => a.type === "export")).toBe(true);
     expect(all.some((a) => a.type === "close")).toBe(true);
   });
@@ -756,13 +769,13 @@ describe("overlay", () => {
     look: 3 + 5 + 3 + 2, // Gubba, mood, camera, pixels
     garden: 2 + 2 + 2 + 3 + 3, // flow, rain, breath, pattern, talk
     sound: 4 * 8 + 2, // four channels of eight pips, mute
-    presets: 7 + 2 + 1, // gardens, watch, export
+    presets: 7 + 2 + 2 + 1, // gardens, watch, Gubba mode, export
   };
 
   it("keeps the HUD, speech scroll, every Settings control and every basket item inside every popular window", () => {
     for (const fb of framebuffers(true)) {
       const { fbW: w, fbH: h, label } = fb;
-      const o = new Overlay(w, h, fb.scale, fb.density);
+      const o = new Overlay(w, h, fb.scale, fb.density, fb.dpr);
       expect(o.scale, label).toBe(fb.uiScale);
       // HUD and speech scroll
       const hud = o.draw(base);
@@ -780,7 +793,7 @@ describe("overlay", () => {
         expectTidy(hits, w, h, `${label} ${tab}`);
         expect(hits.filter((x) => x.action.type === "tab"), `${label} ${tab}`).toHaveLength(4);
         expect(hits.filter((x) => x.action.type === "close"), `${label} ${tab}`).toHaveLength(1);
-        const controls = hits.filter((x) => ["settings", "preset", "watch", "export"].includes(x.action.type));
+        const controls = hits.filter((x) => ["settings", "preset", "watch", "gubba_mode", "export"].includes(x.action.type));
         expect(controls, `${label} ${tab}`).toHaveLength(TAB_CONTROLS[tab]);
         expect(o.pixels.filter((v) => v >= 32 && v !== 255).length, `${label} ${tab}`).toBe(0);
       }
@@ -826,16 +839,33 @@ describe("overlay", () => {
     const box = narrow.draw({ ...base, panel: "settings", tab: "presets" }).find((x) => x.action.type === "none")!;
     expect(exp.x + exp.w).toBeLessThanOrEqual(box.x + box.w - 2);
   });
-  it("draws the overlay at the scene's pixel size in every landscape reference window", () => {
-    // 1456×820, 1920×1080, 1440×900, 1366×768, 1280×720 and phones on their side, in both densities
-    for (const [w, h] of [[1456, 820], [1920, 1080], [1440, 900], [1366, 768], [1280, 720], [844, 390], [667, 375], [568, 320]] as const) {
+  /** Every panel of `o` drawn whole: all controls present, inside the framebuffer and clear of the HUD block. */
+  function whole(o: Overlay, w: number, h: number): boolean {
+    const inside = (hits: readonly OverlayHit[]): boolean => {
+      const hud = hudRect(hits);
+      return hits.every((x) => x.x >= 0 && x.y >= 0 && x.x + x.w <= w + 1e-9 && x.y + x.h <= h + 1e-9 && (x.action.type === "hud" || !overlaps(x, hud)));
+    };
+    for (const tab of TABS) {
+      const hits = o.draw({ ...base, panel: "settings", tab });
+      const controls = hits.filter((x) => ["settings", "preset", "watch", "gubba_mode", "export"].includes(x.action.type)).length;
+      if (!inside(hits) || controls !== TAB_CONTROLS[tab] || hits.filter((x) => x.action.type === "tab").length !== 4) return false;
+    }
+    const basket = o.draw({ ...base, panel: "basket" });
+    return inside(basket) && basket.filter((x) => x.action.type === "place").length === 11;
+  }
+
+  it("draws the overlay at the scene's pixel size in every desktop landscape window", () => {
+    // 1456×820, 1920×1080, 1440×900, 1366×768 and 1280×720 in both densities: identical to the reference
+    for (const [w, h] of [[1456, 820], [1920, 1080], [1440, 900], [1366, 768], [1280, 720]] as const) {
       for (const density of DENSITIES) {
         for (const dpr of [1, 2, 3]) {
           const fb = fbFor(w, h, density, dpr);
-          expect(uiPixelFor(fb.fbW, fb.fbH, fb.scale, density), `${w}×${h} ${density} @${dpr}x`).toBe(fb.scale);
+          expect(uiPixelFor(fb.fbW, fb.fbH, fb.scale, density, dpr), `${w}×${h} ${density} @${dpr}x`).toBe(fb.scale);
         }
       }
     }
+    // and with no pixel ratio given, a phone-shaped framebuffer is left on the scene's pixels as well
+    expect(uiPixelFor(422, 195, 6, "crisp")).toBe(6);
   });
 
   it("gives the overlay larger pixels where the window is narrower than the reference shape", () => {
@@ -845,25 +875,90 @@ describe("overlay", () => {
     expect(uiPixelFor(341, 256, 3, "crisp")).toBe(4); // 1024×768
     expect(uiPixelFor(341, 455, 3, "crisp")).toBe(5); // 1024×1366 large tablet upright
     expect(uiPixelFor(256, 341, 3, "chunky")).toBe(4); // 768×1024 Chunky
-    // never finer than the scene, and never so coarse that the layout loses anything
+    // a tablet's own pixel ratio changes nothing: the window rule already clears a thumb's width
+    expect(uiPixelFor(384, 512, 4, "crisp", 2)).toBe(7); // 768×1024 @2x, 56 CSS pixels
+    expect(uiPixelFor(341, 256, 6, "crisp", 2)).toBe(6); // 1024×768 @2x, 48 CSS pixels
+  });
+
+  it("sizes the controls for a thumb on a phone on its side", () => {
+    // [framebuffer, scene scale, pixel ratio → overlay pixel]; a HUD object is 16 · uiK / dpr CSS pixels
+    expect(uiPixelFor(422, 195, 6, "crisp", 3)).toBe(8); // 844×390 @3x: 32 → 42.7 CSS pixels
+    expect(uiPixelFor(544, 206, 4, "crisp", 3)).toBe(8); // 726×275 @3x (browser chrome and notch taken out): 21.3 → 42.7
+    expect(uiPixelFor(363, 137, 6, "chunky", 3)).toBe(8); // the same window at Chunky: the same controls
+    expect(uiPixelFor(333, 187, 4, "crisp", 2)).toBe(5); // 667×375 @2x: 32 → 40
+    expect(uiPixelFor(444, 173, 3, "crisp", 2)).toBe(5); // 667×260 @2x: 24 → 40
+    expect(uiPixelFor(422, 195, 2, "crisp", 1)).toBe(3); // 844×390 @1x: 32 → 48
+    // 667×375 @1x stays on the scene's pixels: one size up would squeeze the speech scroll under 172 pixels
+    expect(uiPixelFor(333, 187, 2, "crisp", 1)).toBe(2);
+    expect(TOUCH_MIN_CSS).toBe(40);
+    for (const [w, h] of [[844, 390], [726, 275], [667, 375], [667, 260]] as const) {
+      for (const density of DENSITIES) {
+        for (const dpr of [2, 3]) {
+          const fb = fbFor(w, h, density, dpr);
+          const css = (HUD_ICON * uiPixelFor(fb.fbW, fb.fbH, fb.scale, density, dpr)) / dpr;
+          expect(css, `${w}×${h} ${density} @${dpr}x`).toBeGreaterThanOrEqual(TOUCH_MIN_CSS);
+          expect(css, `${w}×${h} ${density} @${dpr}x`).toBeLessThanOrEqual(48);
+        }
+      }
+    }
+  });
+
+  it("opens panels beside the HUD where the canvas is too short to hold them above it", () => {
+    // 726×275 @3x: scene 544×206 at 4 device pixels, overlay 272×103 at 8
+    const o = new Overlay(544, 206, 4, "crisp", 3);
+    expect([o.uiK, o.layer.w, o.layer.h]).toEqual([8, 272, 103]);
+    expect(whole(o, 544, 206)).toBe(true);
+    for (const st of [...TABS.map((tab) => ({ ...base, panel: "settings" as const, tab })), { ...base, panel: "basket" as const }]) {
+      const hits = o.draw(st);
+      const hud = hudRect(hits);
+      const panel = hits.find((x) => x.action.type === "none")!;
+      // right of the block by the 3 overlay pixels the block keeps on its left, from the top margin to the bottom one
+      expect(panel.x).toBe(hud.x + hud.w + 3 * o.scale);
+      expect(panel.y).toBe(3 * o.scale);
+      expect(panel.y + panel.h).toBeLessThanOrEqual(206 - 3 * o.scale);
+      expect(panel.x + panel.w).toBeLessThanOrEqual(544 - 3 * o.scale);
+    }
+    // the speech scroll keeps its place beside the HUD at full width
+    expect(scrollRect(272, 103)).toEqual({ x: 55, y: 69, w: 172, h: 32 });
+    // where everything fits above the HUD the panel stays there: the reference, a tablet, and a taller phone window
+    for (const [w, h, k, dpr] of [[364, 205, 4, 1], [384, 512, 2, 1], [422, 195, 6, 3]] as const) {
+      const above = new Overlay(w, h, k, "crisp", dpr);
+      const hits = above.draw({ ...base, panel: "settings", tab: "presets" });
+      const panel = hits.find((x) => x.action.type === "none")!;
+      expect(panel.x, `${w}×${h}`).toBe(3 * above.scale);
+      expect(panel.y + panel.h, `${w}×${h}`).toBeLessThanOrEqual(hudRect(hits).y);
+    }
+  });
+
+  it("never picks an overlay pixel finer than the scene's, or one whose layout loses anything", () => {
     fc.assert(
-      fc.property(fc.integer({ min: 200, max: 4000 }), fc.integer({ min: 200, max: 4000 }), fc.constantFrom(...DENSITIES), (w, h, density) => {
-        const fb = fbFor(w, h, density);
-        const uiK = uiPixelFor(fb.fbW, fb.fbH, fb.scale, density);
-        if (!Number.isInteger(uiK) || uiK < fb.scale) return false;
-        if (uiK === fb.scale) return true;
-        const cw = Math.floor((fb.fbW * fb.scale) / uiK);
-        const ch = Math.floor((fb.fbH * fb.scale) / uiK);
-        return scrollRect(cw, ch).w === 172 && cw >= 178;
-      }),
+      fc.property(
+        fc.integer({ min: 200, max: 4000 }),
+        fc.integer({ min: 200, max: 4000 }),
+        fc.constantFrom(...DENSITIES),
+        fc.constantFrom(1, 1.5, 2, 2.625, 3),
+        (w, h, density, dpr) => {
+          const fb = fbFor(w, h, density);
+          const uiK = uiPixelFor(fb.fbW, fb.fbH, fb.scale, density, dpr);
+          if (!Number.isInteger(uiK) || uiK < fb.scale) return false;
+          if (uiK === fb.scale) return true;
+          // a step of at least a quarter, the full speech scroll, and every panel whole
+          if (uiK * 4 < fb.scale * 5) return false;
+          const cw = Math.floor((fb.fbW * fb.scale) / uiK);
+          const ch = Math.floor((fb.fbH * fb.scale) / uiK);
+          if (scrollRect(cw, ch).w !== 172 || cw < 178) return false;
+          return whole(new Overlay(fb.fbW, fb.fbH, fb.scale, density, dpr), fb.fbW, fb.fbH);
+        },
+      ),
       { numRuns: 300 },
     );
   });
 
-  it("keeps a HUD object between 6 % and 14 % of the window's shorter side in every playable popular window", () => {
+  it("keeps a HUD object between 6 % and 14 % of the window's shorter side, or a thumb's width where that is larger", () => {
     for (const fb of framebuffers(true)) {
       expect(fb.iconShare, fb.label).toBeGreaterThanOrEqual(0.06);
-      expect(fb.iconShare, fb.label).toBeLessThanOrEqual(0.14);
+      // the thumb size is the smallest whole overlay pixel that reaches TOUCH_MIN_CSS, so under one device pixel more
+      expect(fb.iconCss, fb.label).toBeLessThanOrEqual(Math.max(0.14 * fb.short, TOUCH_MIN_CSS + HUD_ICON / fb.dpr));
     }
   });
 
@@ -900,5 +995,40 @@ describe("overlay", () => {
     expect(scrollRect(222, 125)).toEqual({ x: 55, y: 91, w: 162, h: 32 }); // short and wide: still beside
     expect(scrollRect(192, 256)).toEqual({ x: 3, y: 187, w: 172, h: 32 }); // tablet upright: above, full width
     expect(scrollRect(98, 211).w).toBe(92); // too narrow for either: above, as wide as fits
+  });
+
+  it("draws the speech scroll only as tall as its lines on a canvas too short for a panel above the HUD", () => {
+    expect([1, 2, 3].map(fittedScrollHeight)).toEqual([14, 23, 32]);
+    /** First and last canvas row holding any pixel of the scroll, within the room `scrollRect` gives it. */
+    const rows = (o: Overlay, speech: string): [number, number] => {
+      o.draw({ ...base, speech });
+      const r = scrollRect(o.layer.w, o.layer.h);
+      let top = -1;
+      let bottom = -1;
+      for (let y = r.y; y < r.y + r.h; y++) {
+        for (let x = r.x; x < r.x + r.w; x++) {
+          if (o.pixels[y * o.layer.w + x] === 255) continue;
+          if (top < 0) top = y;
+          bottom = y;
+          break;
+        }
+      }
+      return [top, bottom];
+    };
+    const one = "Five lines. Enough for most days.";
+    const three = "The tide does not hurry, and the whole shore is combed. The tide does not hurry, and the whol";
+    // 726×275 @3x: the canvas is 272×103 and the scroll's room is rows 69…100
+    const phone = new Overlay(544, 206, 4, "crisp", 3);
+    expect(rows(phone, one)).toEqual([87, 100]);
+    expect(rows(phone, three)).toEqual([69, 100]);
+    expect(phone.pixels.filter((v) => v >= 32 && v !== 255).length).toBe(0);
+    // the room it reports is the most it takes, in framebuffer pixels, whatever the text
+    expect(phone.speechRect()).toEqual({ x: 110, y: 138, w: 344, h: 64 });
+    // wherever panels fit above the HUD the scroll is the reference's: the full 32 rows with the text centred
+    for (const [w, h, k, dpr] of [[364, 205, 4, 1], [242, 136, 6, 1], [422, 195, 6, 3], [384, 512, 2, 1]] as const) {
+      const o = new Overlay(w, h, k, "crisp", dpr);
+      const r = scrollRect(o.layer.w, o.layer.h);
+      expect(rows(o, one), `${w}×${h}`).toEqual([r.y, r.y + 31]);
+    }
   });
 });

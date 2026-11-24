@@ -28,6 +28,8 @@ export type UiCommand =
   | { type: "toggle_rain" }
   | { type: "toggle_flow" }
   | { type: "toggle_watch" }
+  /** Key `R`: Gubba mode, in which Gubba rakes one garden after another by himself. */
+  | { type: "toggle_gubba_mode" }
   | { type: "place_element"; kind: ElementKind }
   | { type: "adjust_mix"; channel: MixChannel; delta: -1 | 1 }
   | { type: "apply_preset"; preset: PresetId }
@@ -122,6 +124,9 @@ export function mapKeyDown(k: KeyInfo): UiCommand | null {
       return mod ? null : { type: "next_talk_mode" };
     case "e":
       return mod ? null : { type: "export" };
+    case "r":
+      // never Ctrl+R or Cmd+R: that is the browser's reload
+      return mod ? null : { type: "toggle_gubba_mode" };
     case "q":
       return mod ? null : { type: "orbit", dir: -1 };
     case "w":

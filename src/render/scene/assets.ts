@@ -675,9 +675,10 @@ function tail(body: Group, lumps: readonly (readonly [number, number, number, nu
 function gubbaMoss(): Group {
   const hy = 25.5;
   const { root, body, head } = gubbaRig("gubba_moss", [0, hy - 8, 0]);
-  const base = root.children[0] as Group;
-  part(base, boxG(30, 3, 25), "warm", "cushion", { t: [1, 1.5, 0], ry: 0.22 });
-  part(base, ellG(1.2, 1.2, 1.2, 5, 3, false), "glow", "cushion", { t: [-15.5, 1.2, 14.5] });
+  // the cushion is a sibling of Root, as in the .glb, so it stays on the porch when Gubba gets up
+  const cushion = node(root, "Cushion");
+  part(cushion, boxG(30, 3, 25), "warm", "gubba_cushion", { t: [1, 1.5, 0], ry: 0.22 });
+  part(cushion, ellG(1.2, 1.2, 1.2, 5, 3, false), "glow", "gubba_cushion", { t: [-15.5, 1.2, 14.5] });
   tail(body, [[20, 5, -3, 6.2], [25.5, 6.5, -6.5, 4.2], [27.5, 10, -9, 2.9], [26, 13.4, -10.5, 2]], 0.85);
   part(body, ellG(20, 11, 16, 12, 8), "gubba", "body", { t: [0, 9.5, 0] });
   part(body, ellG(17.5, 8, 14, 12, 7), "gubba", "body", { t: [0, 17, 0.5] });
@@ -711,8 +712,8 @@ function gubbaMoss(): Group {
 function gubbaKasa(): Group {
   const hy = 26.5;
   const { root, body, head } = gubbaRig("gubba_kasa", [0, hy - 8, 0]);
-  const base = root.children[0] as Group;
-  part(base, boxG(26, 3, 22), "warm", "cushion", { t: [0, 1.5, 0], ry: -0.18 });
+  const cushion = node(root, "Cushion");
+  part(cushion, boxG(26, 3, 22), "warm", "gubba_cushion", { t: [0, 1.5, 0], ry: -0.18 });
   tail(body, [[-16, 4.6, 8, 5.8], [-21.5, 5.6, 12, 3.8], [-22.5, 9, 14.5, 2.6], [-21, 12, 15.5, 1.8]], 0.85);
   part(body, ellG(16, 12, 14, 12, 8), "gubba", "body", { t: [0, 11.5, 0] });
   part(body, ellG(11, 8.6, 5), "belly", "belly", { t: [0, 9.2, 10.2], cast: false });

@@ -332,14 +332,25 @@ test.describe("Gubba's Porch — 3D 8-bit Zen Garden E2E", () => {
 
     // Watch Gubba rake on three_islands matches exact golden hash 0x5759828d and single Undo restores prior garden
     const beforeWatchHash = await page.evaluate(() => window.__rakeMe!.sandHash());
-    await page.evaluate(() => {
+    const undoBeforeWatch = await page.evaluate(() => window.__rakeMe!.state().undoCount);
+    const watched = await page.evaluate(() => {
       const api = window.__rakeMe!;
       api.setFlow(false);
       api.setWatchGubbaRake(true);
       api.loadPreset("three_islands");
-      api.advance(90_000);
+      // Gubba gets up and builds it: stones first, then the sand, then back to his cushion
+      const started = api.auto().working && api.auto().target === "three_islands";
+      for (let t = 0; t < 900_000 && api.auto().working; t += 500) api.advance(500);
+      return { started, after: api.auto() };
     });
+    expect(watched.started).toBe(true);
+    expect(watched.after.working).toBe(false);
+    expect(watched.after.seated).toBe(true);
+    expect(watched.after.mode).toBe(false);
+    expect(watched.after.lastSealDiffCells).toBeLessThanOrEqual(64);
     expect(await page.evaluate(() => window.__rakeMe!.sandHash())).toBe(0x5759828d);
+    expect(await page.evaluate(() => window.__rakeMe!.state().elementCount)).toBe(3);
+    expect(await page.evaluate(() => window.__rakeMe!.state().undoCount)).toBe(undoBeforeWatch + 1);
     await page.evaluate(() => window.__rakeMe!.undo());
     expect(await page.evaluate(() => window.__rakeMe!.sandHash())).toBe(beforeWatchHash);
 

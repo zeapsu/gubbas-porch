@@ -13,6 +13,13 @@ import {
   ELEMENT_FOOTPRINTS, encodeGarden, encodeSettings, MAX_GARDEN_BYTES, PRESET_GOLDEN_HASHES, PRESETS, UndoStack,
 } from "../../src/state/index.ts";
 import type { ElementInstance, GardenState, PresetId } from "../../src/state/index.ts";
+import {
+  createHaptics, HAPTIC_PATTERNS, HAPTIC_SWITCH_ID, hapticSource, STONE_BRUSH_COOLDOWN_MS,
+} from "../../src/ui/haptics.ts";
+import type { HapticKind, HapticsEnv } from "../../src/ui/haptics.ts";
+import {
+  createTouchBrush, discOffsets, pullTouchBrush, resetTouchBrush, TOUCH_BRUSH_RADIUS_PX, TOUCH_SLOP_PX,
+} from "../../src/ui/touch.ts";
 
 const EMPTY_CONTEXT: StrokeStartContext = { stones: [], flow: false };
 const STONE: ElementInstance = {
@@ -533,5 +540,425 @@ describe("garden state", () => {
       }
     }
     expect(PRESETS.three_islands.elements.map(element => element.kind.startsWith("stone_"))).toEqual([true, true, true]);
+  });
+});
+
+describe("touch input steadying", () => {
+  const SLOP = TOUCH_SLOP_PX;
+  const RADIUS = TOUCH_BRUSH_RADIUS_PX;
+  const PX_PER_CELL = 2; // a phone on its side shows the bed at about two CSS pixels per sand cell
+
+  /** Rakes a finger path given in CSS pixels the way main.ts does: through the brush, then the stroke engine. */
+  function touchStroke(grid: SandGrid, finger: readonly SandVec2[]): { carved: boolean; brush: SandVec2 } {
+    const engine = createStrokeEngine(grid);
+    const brush = createTouchBrush();
+    const press = finger[0]!;
+    resetTouchBrush(brush, press.x, press.y);
+    engine.begin({ x: press.x / PX_PER_CELL, y: press.y / PX_PER_CELL }, RAKE_BY_ID.take, "touch", EMPTY_CONTEXT);
+    for (const p of finger.slice(1)) {
+      if (!pullTouchBrush(brush, p.x, p.y, SLOP, RADIUS)) continue;
+      engine.extend([{ x: brush.x / PX_PER_CELL, y: brush.y / PX_PER_CELL }], 16);
+    }
+    return { carved: engine.end().rect.w > 0, brush: { x: brush.x, y: brush.y } };
+  }
+
+  it("draws nothing for a tap or a thumb settling on the glass", () => {
+    const grid = createSandGrid();
+    const wobble = [{ x: 100, y: 100 }, { x: 103, y: 101 }, { x: 105, y: 104 }, { x: 101, y: 106 }, { x: 96, y: 99 }];
+    expect(wobble.slice(1).every(p => Math.hypot(p.x - 100, p.y - 100) < SLOP)).toBe(true);
+    // the same wobble is more than the engine's own three cells, so without the slop it would carve a dab
+    expect(Math.hypot(101 - 100, 106 - 100) / PX_PER_CELL).toBeGreaterThanOrEqual(3);
+    expect(touchStroke(grid, wobble)).toEqual({ carved: false, brush: { x: 100, y: 100 } });
+    sameGrid(grid, createSandGrid());
+  });
+
+  it("starts the stroke at the press and trails the finger by the string", () => {
+    const grid = createSandGrid();
+    const finger = Array.from({ length: 41 }, (_, i) => ({ x: 100 + i * 2, y: 101 }));
+    const { carved, brush } = touchStroke(grid, finger);
+    expect(carved).toBe(true);
+    expect(brush.x).toBeCloseTo(180 - RADIUS);
+    expect(brush.y).toBe(101);
+    // carved from the cell under the press (DESIGN.md 3.3 step 7), not from where the slop ended
+    expect(grid.height[50 * grid.w + 50]).toBe(-2);
+    expect(grid.height[50 * grid.w + 87]).toBe(-2);
+    expect(grid.height[50 * grid.w + 92]).toBe(0);
+  });
+
+  it("ignores jitter shorter than the string and shrinks the roll of a lifting finger", () => {
+    const brush = createTouchBrush();
+    resetTouchBrush(brush, 100, 100);
+    for (let x = 102; x <= 200; x += 2) pullTouchBrush(brush, x, 100, SLOP, RADIUS);
+    expect(brush).toMatchObject({ x: 200 - RADIUS, y: 100, engaged: true });
+
+    // a resting thumb: every sample stays within the string of the brush
+    for (const [dx, dy] of [[1, 1], [-1.5, 0.5], [0.5, -2], [2, 0]] as const) {
+      expect(pullTouchBrush(brush, 198 + dx, 100 + dy, SLOP, RADIUS)).toBe(false);
+    }
+    expect(brush).toMatchObject({ x: 200 - RADIUS, y: 100 });
+
+    // the pad rolls 3 px sideways as it leaves the glass: the brush moves under a third of that
+    pullTouchBrush(brush, 200, 100, SLOP, RADIUS);
+    pullTouchBrush(brush, 200, 101.5, SLOP, RADIUS);
+    pullTouchBrush(brush, 200, 103, SLOP, RADIUS);
+    expect(Math.abs(brush.y - 100)).toBeLessThan(1);
+    expect(brush.x).toBeLessThan(200 - RADIUS + 1);
+  });
+
+  it("keeps the brush within the string of the finger and never ahead of its travel", () => {
+    const step = fc.record({ dx: fc.integer({ min: -40, max: 40 }), dy: fc.integer({ min: -40, max: 40 }) });
+    fc.assert(fc.property(fc.array(step, { minLength: 1, maxLength: 40 }), steps => {
+      const brush = createTouchBrush();
+      resetTouchBrush(brush, 0, 0);
+      let x = 0;
+      let y = 0;
+      let fingerTravel = 0;
+      let brushTravel = 0;
+      for (const { dx, dy } of steps) {
+        x += dx / 4;
+        y += dy / 4;
+        fingerTravel += Math.hypot(dx / 4, dy / 4);
+        const fromX = brush.x;
+        const fromY = brush.y;
+        const moved = pullTouchBrush(brush, x, y, SLOP, RADIUS);
+        brushTravel += Math.hypot(brush.x - fromX, brush.y - fromY);
+        expect(moved).toBe(brush.x !== fromX || brush.y !== fromY);
+        if (brush.engaged) expect(Math.hypot(x - brush.x, y - brush.y)).toBeLessThanOrEqual(RADIUS + 1e-9);
+        else expect(brush).toMatchObject({ x: 0, y: 0 });
+      }
+      expect(brushTravel).toBeLessThanOrEqual(fingerTravel + 1e-9);
+    }), { numRuns: 200 });
+    const brush = createTouchBrush();
+    resetTouchBrush(brush, 5, 5);
+    expect(pullTouchBrush(brush, Number.NaN, 50, SLOP, RADIUS)).toBe(false);
+    expect(brush).toMatchObject({ x: 5, y: 5, engaged: false });
+  });
+
+  it("lists the offsets of a disc nearest first, each exactly once", () => {
+    const offsets = discOffsets(6);
+    const seen = new Set<string>();
+    let previous = -1;
+    for (let i = 0; i < offsets.length; i += 2) {
+      const d = offsets[i]! ** 2 + offsets[i + 1]! ** 2;
+      expect(d).toBeGreaterThanOrEqual(previous);
+      expect(d).toBeLessThanOrEqual(36);
+      previous = d;
+      seen.add(`${offsets[i]},${offsets[i + 1]}`);
+    }
+    expect([offsets[0], offsets[1]]).toEqual([0, 0]);
+    expect(seen.size).toBe(offsets.length / 2);
+    expect(seen.size).toBe(113); // lattice points with dx² + dy² ≤ 36
+    expect(seen.has("6,0") && seen.has("0,-6") && seen.has("-4,4") && !seen.has("5,4")).toBe(true);
+    expect(discOffsets(0)).toEqual(Int8Array.of(0, 0));
+  });
+});
+
+describe("haptics", () => {
+  const KINDS = Object.keys(HAPTIC_PATTERNS) as HapticKind[];
+
+  interface FakeEvent { type: string; target: FakeNode; stopped: boolean; stopPropagation(): void }
+  type Listener = (ev: FakeEvent) => void;
+
+  /** Just enough DOM for the hidden switch: attributes, a tree, bubbling events and label activation. */
+  class FakeNode {
+    parent: FakeNode | null = null;
+    children: FakeNode[] = [];
+    attrs = new Map<string, string>();
+    listeners = new Map<string, Listener[]>();
+    style = { cssText: "" };
+    id = "";
+    checked = false;
+    constructor(readonly tag: string, readonly doc: FakeDoc) {}
+    setAttribute(k: string, v: string): void { this.attrs.set(k, v); }
+    addEventListener(type: string, fn: Listener): void {
+      this.listeners.set(type, [...(this.listeners.get(type) ?? []), fn]);
+    }
+    removeEventListener(type: string, fn: Listener): void {
+      this.listeners.set(type, (this.listeners.get(type) ?? []).filter(f => f !== fn));
+    }
+    appendChild(child: FakeNode): FakeNode {
+      child.parent = this;
+      this.children.push(child);
+      return child;
+    }
+    remove(): void {
+      if (this.parent) this.parent.children = this.parent.children.filter(c => c !== this);
+      this.parent = null;
+    }
+    dispatch(type: string): void {
+      const ev: FakeEvent = { type, target: this, stopped: false, stopPropagation() { this.stopped = true; } };
+      for (const node of [this, ...this.ancestors()]) {
+        if (ev.stopped) break;
+        for (const fn of node.listeners.get(type) ?? []) fn(ev);
+      }
+    }
+    ancestors(): FakeNode[] {
+      return this.parent ? [this.parent, ...this.parent.ancestors()] : [];
+    }
+    /** A label's click toggles its control, which fires its own click, input and change. */
+    click(): void {
+      this.dispatch("click");
+      const box = this.tag === "LABEL" ? this.children.find(c => c.tag === "INPUT") : undefined;
+      if (!box) return;
+      box.checked = !box.checked;
+      if (this.doc.focusOnToggle) this.doc.activeElement = box;
+      for (const type of ["click", "input", "change"]) box.dispatch(type);
+    }
+    focus(): void { this.doc.activeElement = this; }
+    blur(): void { if (this.doc.activeElement === this) this.doc.activeElement = this.doc.body; }
+    listenerCount(): number {
+      return [...this.listeners.values()].reduce((n, fns) => n + fns.length, 0);
+    }
+  }
+
+  class FakeDoc {
+    body: FakeNode = new FakeNode("BODY", this);
+    activeElement: FakeNode = this.body;
+    /** Models a browser that moves focus to a control toggled through its label. */
+    focusOnToggle = false;
+    createElement(tag: string): FakeNode { return new FakeNode(tag.toUpperCase(), this); }
+  }
+
+  function fakeMotionQuery(matches = false) {
+    const listeners: ((ev: { matches: boolean }) => void)[] = [];
+    return {
+      listeners,
+      query: {
+        matches,
+        addEventListener: (_type: "change", fn: (ev: { matches: boolean }) => void) => { listeners.push(fn); },
+        removeEventListener: (_type: "change", fn: (ev: { matches: boolean }) => void) => {
+          listeners.splice(listeners.indexOf(fn), 1);
+        },
+      },
+      set(value: boolean) { for (const fn of [...listeners]) fn({ matches: value }); },
+    };
+  }
+
+  /** An Android-like browser: `navigator.vibrate` exists and records what it was asked to play. */
+  function android(extra: Partial<HapticsEnv> = {}) {
+    const calls: (number | number[])[] = [];
+    const doc = new FakeDoc();
+    const navigator = {
+      vibrate(this: unknown, pattern: number | number[]): boolean {
+        expect(this).toBe(navigator);
+        calls.push(pattern);
+        return true;
+      },
+    };
+    const haptics = createHaptics({ navigator, document: doc as unknown as Document, now: () => 0, ...extra });
+    return { haptics, calls, doc };
+  }
+
+  /** An iOS-like browser: no `navigator.vibrate`, so the hidden switch is the only backend. */
+  function ios(extra: Partial<HapticsEnv> = {}) {
+    const doc = new FakeDoc();
+    const haptics = createHaptics({ navigator: {}, document: doc as unknown as Document, now: () => 0, ...extra });
+    const label = () => doc.body.children.find(c => c.id === HAPTIC_SWITCH_ID);
+    return { haptics, doc, label, box: () => label()?.children[0] };
+  }
+
+  it("keeps every pattern short and calm", () => {
+    expect(HAPTIC_PATTERNS).toEqual({
+      tap: 8, select: 12, preview: 16, thud: [18, 45, 10], sweep: [12, 80, 12], strokeStart: 5, stoneBrush: 7,
+    });
+    for (const kind of KINDS) {
+      const pattern = [HAPTIC_PATTERNS[kind]].flat();
+      expect(pattern.length % 2).toBe(1); // on, off, on: never ends on a pause
+      expect(Math.max(...pattern.filter((_, i) => i % 2 === 0))).toBeLessThanOrEqual(20);
+      expect(pattern.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(120);
+    }
+    expect(HAPTIC_PATTERNS.strokeStart).toBeLessThan(HAPTIC_PATTERNS.tap as number);
+  });
+
+  it("plays each kind's own pattern through navigator.vibrate and never builds the switch", () => {
+    let t = 0;
+    const { haptics, calls, doc } = android({ now: () => (t += 1000) }); // spaced out, so no cooldown applies
+    for (const kind of KINDS) expect(haptics.trigger(kind, "touch")).toBe(true);
+    expect(calls).toEqual(KINDS.map(kind => HAPTIC_PATTERNS[kind]));
+    // the very same pre-allocated pattern is handed over each time
+    expect(calls[KINDS.indexOf("thud")]).toBe(HAPTIC_PATTERNS.thud);
+    // a hold maturing in the frame loop still vibrates
+    expect(haptics.trigger("preview", "hold")).toBe(true);
+    expect(calls.at(-1)).toBe(HAPTIC_PATTERNS.preview);
+    expect(haptics).toMatchObject({ count: KINDS.length + 1, last: "preview" });
+    expect(doc.body.children).toEqual([]);
+  });
+
+  it("does not count a vibration the browser refused", () => {
+    const haptics = createHaptics({ navigator: { vibrate: () => false }, now: () => 0 });
+    expect(haptics.trigger("tap", "touch")).toBe(false);
+    expect(haptics).toMatchObject({ count: 0, last: null });
+  });
+
+  it("falls back to one hidden, reused switch when navigator.vibrate is absent", () => {
+    const { haptics, doc, label, box } = ios();
+    expect(doc.body.children).toEqual([]); // nothing is built until a finger needs it
+    expect(haptics.trigger("select", "touch")).toBe(true);
+    expect(doc.body.children).toHaveLength(1);
+    expect(label()!.tag).toBe("LABEL");
+    expect(Object.fromEntries(label()!.attrs)).toEqual({ "aria-hidden": "true" });
+    expect(box()!.tag).toBe("INPUT");
+    expect(Object.fromEntries(box()!.attrs)).toEqual({
+      type: "checkbox", switch: "", "aria-hidden": "true", tabindex: "-1",
+    });
+    const style = label()!.style.cssText.split(";");
+    for (const rule of ["position:fixed", "opacity:0", "pointer-events:none", "width:0", "height:0", "overflow:hidden"]) {
+      expect(style).toContain(rule);
+    }
+    expect(box()!.checked).toBe(true);
+
+    const first = label();
+    for (const kind of KINDS) expect(haptics.trigger(kind, "touch")).toBe(kind !== "stoneBrush");
+    expect(label()).toBe(first);
+    expect(doc.body.children).toHaveLength(1);
+    expect(box()!.checked).toBe(KINDS.length % 2 === 1); // one toggle per haptic; the stone nudge was in cooldown
+    expect(haptics).toMatchObject({ count: KINDS.length, last: "strokeStart" });
+  });
+
+  it("never clicks the switch outside a touch gesture", () => {
+    const { haptics, doc } = ios();
+    // a timer-driven hold has no user activation on iOS, so the click would be wasted
+    for (const kind of KINDS) expect(haptics.trigger(kind, "hold")).toBe(false);
+    expect(doc.body.children).toEqual([]);
+    expect(haptics.count).toBe(0);
+  });
+
+  it("stays silent for a mouse, a pen, the keyboard and anything else that is not a finger", () => {
+    expect(["touch", "mouse", "pen", "", "TOUCH"].map(hapticSource)).toEqual(["touch", "other", "other", "other", "other"]);
+    const droid = android();
+    const iphone = ios();
+    for (const kind of KINDS) {
+      expect(droid.haptics.trigger(kind, hapticSource("mouse"))).toBe(false);
+      expect(iphone.haptics.trigger(kind, hapticSource("pen"))).toBe(false);
+    }
+    expect(droid.calls).toEqual([]);
+    expect(iphone.doc.body.children).toEqual([]);
+  });
+
+  it("rate-limits the stone nudge and nothing else", () => {
+    let t = 1000;
+    const { haptics, calls } = android({ now: () => t });
+    const fire = (kind: HapticKind, at: number): boolean => {
+      t = at;
+      return haptics.trigger(kind, "touch");
+    };
+    expect(STONE_BRUSH_COOLDOWN_MS).toBeGreaterThanOrEqual(250);
+    expect(fire("stoneBrush", 1000)).toBe(true);
+    // a rake dragged along a stone reports a hit on every move
+    for (let at = 1016; at < 1000 + STONE_BRUSH_COOLDOWN_MS; at += 16) expect(fire("stoneBrush", at)).toBe(false);
+    expect(fire("stoneBrush", 1000 + STONE_BRUSH_COOLDOWN_MS)).toBe(true);
+    // it also waits out any other haptic, so a stroke that starts against a stone gives one tick, not two
+    expect(fire("strokeStart", 2000)).toBe(true);
+    expect(fire("stoneBrush", 2000)).toBe(false);
+    expect(fire("stoneBrush", 2249)).toBe(false);
+    expect(fire("stoneBrush", 2250)).toBe(true);
+    // every other kind answers at once
+    for (const kind of KINDS.filter(k => k !== "stoneBrush")) expect(fire(kind, 2251)).toBe(true);
+    expect(calls.filter(p => p === HAPTIC_PATTERNS.stoneBrush)).toHaveLength(3);
+
+    const iphone = ios({ now: () => t });
+    t = 5000;
+    expect(iphone.haptics.trigger("stoneBrush", "touch")).toBe(true);
+    t = 5100;
+    expect(iphone.haptics.trigger("stoneBrush", "touch")).toBe(false);
+    expect(iphone.box()!.checked).toBe(true);
+  });
+
+  it("is silent under prefers-reduced-motion and follows the setting live", () => {
+    for (const make of [android, ios]) {
+      const motion = fakeMotionQuery(true);
+      const asked: string[] = [];
+      const { haptics, doc } = make({ matchMedia: (q) => { asked.push(q); return motion.query; } });
+      expect(asked).toEqual(["(prefers-reduced-motion: reduce)"]);
+      for (const kind of KINDS) expect(haptics.trigger(kind, "touch")).toBe(false);
+      expect(haptics.trigger("preview", "hold")).toBe(false);
+      expect(haptics.count).toBe(0);
+      expect(doc.body.children).toEqual([]); // not even the switch is built
+
+      motion.set(false);
+      expect(haptics.trigger("tap", "touch")).toBe(true);
+      motion.set(true);
+      expect(haptics.trigger("tap", "touch")).toBe(false);
+      expect(haptics.count).toBe(1);
+    }
+  });
+
+  it("keeps the switch's events to itself and leaves focus where it was", () => {
+    const { haptics, doc, label, box } = ios();
+    const leaked: string[] = [];
+    for (const type of ["click", "input", "change"]) doc.body.addEventListener(type, ev => leaked.push(ev.type));
+    const canvas = doc.body.appendChild(doc.createElement("canvas"));
+    canvas.focus();
+
+    expect(haptics.trigger("tap", "touch")).toBe(true);
+    expect(box()!.checked).toBe(true);
+    expect(leaked).toEqual([]);
+    expect(doc.activeElement).toBe(canvas);
+
+    // the fake does bubble: with the engine's listeners gone, the same click reaches the body
+    for (const [type, fns] of label()!.listeners) for (const fn of fns) label()!.removeEventListener(type, fn);
+    label()!.click();
+    expect(leaked).toEqual(["click", "click", "input", "change"]);
+
+    // a browser that focuses the toggled control gets focus handed straight back
+    const strict = ios();
+    strict.doc.focusOnToggle = true;
+    const field = strict.doc.body.appendChild(strict.doc.createElement("canvas"));
+    field.focus();
+    expect(strict.haptics.trigger("tap", "touch")).toBe(true);
+    expect(strict.doc.activeElement).toBe(field);
+    strict.doc.activeElement = strict.doc.body;
+    expect(strict.haptics.trigger("tap", "touch")).toBe(true);
+    expect(strict.doc.activeElement).toBe(strict.doc.body);
+  });
+
+  it("removes the switch and every listener on dispose", () => {
+    const motion = fakeMotionQuery(false);
+    const { haptics, doc, label } = ios({ matchMedia: () => motion.query });
+    expect(motion.listeners).toHaveLength(1);
+    haptics.trigger("tap", "touch");
+    const mounted = label()!;
+    expect(mounted.listenerCount()).toBe(3);
+
+    haptics.dispose();
+    expect(doc.body.children).toEqual([]);
+    expect(mounted.listenerCount()).toBe(0);
+    expect(motion.listeners).toEqual([]);
+    expect(haptics.trigger("tap", "touch")).toBe(false);
+    expect(doc.body.children).toEqual([]);
+    expect(() => haptics.dispose()).not.toThrow();
+
+    const droid = android({ matchMedia: () => motion.query });
+    droid.haptics.dispose();
+    expect(droid.haptics.trigger("tap", "touch")).toBe(false);
+    expect(droid.calls).toEqual([]);
+    expect(motion.listeners).toEqual([]);
+  });
+
+  it("does nothing, quietly, where a backend is missing or broken", () => {
+    const boom = (): never => { throw new Error("nope"); };
+    const envs: HapticsEnv[] = [
+      {}, // Node, SSR
+      { navigator: {} }, // no document
+      { navigator: { vibrate: boom } }, // a blocked Vibration API
+      { navigator: {}, document: {} as Document }, // a document with no body yet
+      { navigator: {}, document: { body: {}, createElement: boom } as unknown as Document },
+      { navigator: {}, matchMedia: boom },
+      { navigator: {}, matchMedia: () => ({ matches: false }) }, // Safari < 14: no addEventListener on the query
+    ];
+    for (const env of envs) {
+      const haptics = createHaptics(env);
+      for (const kind of KINDS) {
+        expect(haptics.trigger(kind, "touch")).toBe(false);
+        expect(haptics.trigger(kind, "hold")).toBe(false);
+      }
+      expect(haptics).toMatchObject({ count: 0, last: null });
+      expect(() => haptics.dispose()).not.toThrow();
+    }
+    // a broken media query does not take a working vibrator down with it
+    const calls: unknown[] = [];
+    const haptics = createHaptics({ navigator: { vibrate: p => calls.push(p) > 0 }, matchMedia: boom });
+    expect(haptics.trigger("tap", "touch")).toBe(true);
+    expect(calls).toEqual([8]);
   });
 });

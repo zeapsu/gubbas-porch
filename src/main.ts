@@ -1,5 +1,7 @@
 import { AudioEngine } from "./audio/index.ts";
 import {
+  applyAutoGait,
+  autoPhase,
   breathInto,
   createGubbaState,
   createPose,
@@ -11,7 +13,11 @@ import { createStrokeEngine, RAKE_BY_ID } from "./rakes/index.ts";
 import type { StrokeTelemetry } from "./rakes/index.ts";
 import {
   CAMERA_PRESETS,
+  GUBBA_YAW,
+  HANG_Z,
   MAX_ELEMENTS,
+  PROP_ORIGINS,
+  RACK_SLOTS,
   RakeRenderer,
   clampOrbit,
   cloneRig,
@@ -23,27 +29,19 @@ import {
   webgl2Available,
 } from "./render/index.ts";
 import type {
+  GardenAutoFrame,
   GardenFrame,
   OverlayAction,
   OverlayState,
   SettingsPatch,
   SettingsTab,
 } from "./render/index.ts";
-import {
-  SWEEP_DURATION_MS,
-  applySweep,
-  clearSandGrid,
-  deflect,
-  includeRect,
-  rebuildRockMask,
-  sandHash,
-} from "./sand/index.ts";
+import { SWEEP_DURATION_MS, applySweep, deflect, includeRect, sandHash } from "./sand/index.ts";
 import type { SandRect } from "./sand/index.ts";
 import {
   DEFAULT_SETTINGS,
   ELEMENT_FOOTPRINTS,
   GARDEN_STORAGE_KEY,
-  PRESETS,
   SETTINGS_STORAGE_KEY,
   applyPreset,
   createGardenStore,
@@ -63,6 +61,7 @@ import type {
   GubbaVariant,
   MoodId,
   MoodSetting,
+  PickResult,
   PixelDensity,
   PresetId,
   RakeId,
@@ -70,16 +69,27 @@ import type {
   Vec2,
 } from "./state/types.ts";
 import {
+  TOUCH_BRUSH_RADIUS_PX,
+  TOUCH_OVERLAY_SLOP_PX,
+  TOUCH_PICK_RADIUS_PX,
+  TOUCH_SLOP_PX,
   adjustMix,
   bindKeyboard,
+  createAutoRunner,
   createDomMirror,
+  createHaptics,
+  createTouchBrush,
+  discOffsets,
   effectiveMood,
+  hapticSource,
   needsLandscape,
   nextBreathPattern,
   nextCameraPreset,
   nextGubbaVariant,
   nextMoodSetting,
   nextTalkMode,
+  pullTouchBrush,
+  resetTouchBrush,
   setGubbaVariant,
   setMoodSetting,
   setRake,
@@ -91,7 +101,7 @@ import {
   toggleRain,
   withHeardStories,
 } from "./ui/index.ts";
-import type { UiCommand } from "./ui/index.ts";
+import type { HapticKind, HapticSource, UiCommand } from "./ui/index.ts";
 
 interface RakeMeTestApi {
   sandHash(): number;
@@ -104,10 +114,36 @@ interface RakeMeTestApi {
     panel: OverlayState["panel"];
     tab: SettingsTab;
     speech: string | null;
+    /** The hanging rake currently lifted off the wall by a hover or a thumb, if any. */
+    hoverRake: RakeId | null;
     watchGubbaRake: boolean;
+    gubbaMode: boolean;
+    undoCount: number;
+    redoCount: number;
     /** True while the turn-sideways prompt covers the garden (an upright phone). */
     rotateBlocked: boolean;
   };
+  /** Where Gubba is and what he is doing while he rakes the garden himself. */
+  auto(): {
+    mode: boolean;
+    watch: boolean;
+    phase: string;
+    target: PresetId | null;
+    rootPos: { x: number; y: number; z: number };
+    yaw: number;
+    seated: boolean;
+    working: boolean;
+    heldRake: RakeId | null;
+    /** True while his rake is on the sand in a stroke, or the broom is sweeping. */
+    raking: boolean;
+    carriedKind: ElementKind | null;
+    sandPlan: "none" | "nagi" | "sweep" | null;
+    lastSealDiffCells: number;
+    cyclesCompleted: number;
+  };
+  setGubbaMode(on: boolean): void;
+  /** Asks Gubba for one preset: the next garden in Gubba mode, otherwise a single "Watch" run. */
+  autoRequest(id: PresetId): boolean;
   stroke(points: readonly Vec2[], rakeId?: RakeId): number;
   advance(ms: number): void;
   setMood(id: MoodId): void;
@@ -145,6 +181,8 @@ interface RakeMeTestApi {
   frameHash(): number;
   paletteViolations(): number;
   particleCount(): number;
+  /** How many haptics have played since boot, and the last kind. */
+  haptics(): { count: number; last: HapticKind | null };
   exportPng(scale?: number, includeOverlay?: boolean): Promise<{ width: number; height: number; bytes: number }>;
   readonly audio: { state: AudioContextState | "locked"; masterGain: number };
 }
@@ -161,8 +199,21 @@ const HOKI_HOLD_MS = 800;
 const TOUCH_RAKE_HOLD_MS = 350;
 const TOUCH_PREVIEW_LINGER_MS = 2600;
 const TOUCH_HOLD_MOVE_SLOP_PX = 16;
-const HAPTIC_STONE_COOLDOWN_MS = 120;
-const WATCH_SPEED_CELLS_PER_SEC = 40;
+/** A second finger landing this soon after the first means a pinch was meant, not a stroke. */
+const PINCH_GRACE_MS = 150;
+/** A stroke shorter than this when a second finger lands was the pinch's first finger settling. */
+const PINCH_TRAVEL_PX = 24;
+/** A touch that lands this close outside the bed (on its frame) still starts a stroke instead of an orbit. */
+const TOUCH_BED_MARGIN_CELLS = 8;
+/** The held rake follows a touch stroke no further than this outside the bed, so it never passes through the wall. */
+const TOUCH_RAKE_VISUAL_MARGIN_CELLS = 8;
+/** How far outside the bed a touch stroke's path is followed; the widest rake reaches 18 cells. */
+const TOUCH_STROKE_REACH_CELLS = 192;
+/** A mouse has to move this far with a stone held before the stone starts to follow. */
+const MOUSE_DRAG_SLOP_PX = 3;
+/** Largest touch search radius in framebuffer pixels, whatever the pixel density. */
+const TOUCH_SEARCH_MAX_FB = 8;
+const TOUCH_SEARCH_OFFSETS = discOffsets(TOUCH_SEARCH_MAX_FB);
 const STATIONARY_FOLEY_TIMEOUT_MS = 80;
 
 function readStorage(key: string): string | null {
@@ -214,6 +265,13 @@ const HOVER_TAGS: Record<RakeId, string> = {
   nagi: `${RAKE_BY_ID.nagi.name} · ${RAKE_BY_ID.nagi.shortDesc}`,
   hoki: `${RAKE_BY_ID.hoki.name} · hold to sweep`,
 };
+
+// Shown while a stone picked from the basket by touch waits to be placed: a finger has no ghost to follow
+const PLACE_HINTS = Object.fromEntries(
+  Object.entries(ELEMENT_FOOTPRINTS).map(([kind, fp]) => [kind, `${fp.label} · touch the sand to place`]),
+) as Record<ElementKind, string>;
+
+const NOTHING_PICKED: PickResult = { kind: "none" };
 
 async function boot(): Promise<void> {
   const canvas = document.getElementById("garden-canvas");
@@ -283,7 +341,6 @@ async function boot(): Promise<void> {
   const renderer = await RakeRenderer.create(canvas);
   window.removeEventListener("resize", onBootResize);
   const strokeEngine = createStrokeEngine(store.garden.sand);
-  const watchEngine = createStrokeEngine(store.garden.sand);
 
   const reducedMotionQuery = window.matchMedia?.("(prefers-reduced-motion: reduce)");
   let reducedMotion = reducedMotionQuery?.matches ?? false;
@@ -383,6 +440,9 @@ async function boot(): Promise<void> {
   let hoverRake: RakeId | null = null;
   const rakeHeadBuf: Vec2 = { x: 96, y: 84 };
   let hasRakeHead = true;
+  // True once the player has brought their rake over the sand (pointer hover, arrow keys). While Gubba is at
+  // work and it is false, their rake waits on the wall instead of lying on the bed where he walks.
+  let playerRakeOut = false;
   let rakeHeading = 0;
   const hoverTailBuf: Vec2 = { x: 88, y: 84 };
   let activePointerId: number | null = null;
@@ -392,8 +452,22 @@ async function boot(): Promise<void> {
   let lastFoleyMoveMs = -Infinity;
   let lastFoleyScreenX = 0.5;
   let foleyStationarySilenced = true;
-  let orbitDrag: { pointerId: number; startX: number; startY: number; az: number; el: number; twoFinger?: boolean } | null = null;
+  // Orbit drags apply each move's own delta, so reversing at an orbit limit responds at once instead of first
+  // unwinding the overshoot. `engaged` stays false while a touch is still inside the tap slop.
+  let orbitDrag: { pointerId: number; lastX: number; lastY: number; engaged: boolean; twoFinger?: boolean } | null = null;
   let pinchDist: number | null = null;
+  // Touch stroke bookkeeping: the string brush that steadies the finger, and what decides whether a stroke was
+  // really the first finger of a pinch (see `endStrokeForSecondFinger`).
+  const touchBrush = createTouchBrush();
+  const strokePressSand: Vec2 = { x: 0, y: 0 };
+  const strokePts: Vec2[] = [];
+  let strokeDownTs = 0;
+  let strokeTravelPx = 0;
+  let strokeLastClientX = 0;
+  let strokeLastClientY = 0;
+  let strokeCarving = false;
+  let strokeEngineBegun = false;
+  let strokeSawSweep = false;
   const activeTouches = new Map<number, { x: number; y: number }>();
   let touchRakeHold: {
     id: RakeId;
@@ -407,19 +481,18 @@ async function boot(): Promise<void> {
   let hokiTouchHold: { pointerId: number; startX: number; startY: number } | null = null;
   let touchPreviewTag: { id: RakeId; untilMs: number } | null = null;
   let touchPlacingPointerId: number | null = null;
-  let lastStoneHapticMs = -Infinity;
+  let placingByTouch = false;
+  let lastPointerTouch = false;
   let lastSpeechText: string | null = null;
 
-  function haptic(ms: number): void {
-    if (reducedMotion) return;
-    try {
-      if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") {
-        navigator.vibrate(ms);
-      }
-    } catch {
-      // Ignore blocked or unsupported Web Vibration API
-    }
-  }
+  // Touch-only feedback: every call names its source, and anything but a finger is silent (see ui/haptics.ts).
+  // iOS plays its tick only from inside a pointer handler, so those calls stay synchronous in the handlers below.
+  const haptics = createHaptics({
+    navigator,
+    document,
+    matchMedia: typeof window.matchMedia === "function" ? (q) => window.matchMedia(q) : undefined,
+    now: () => performance.now(),
+  });
 
   const zeroSpeedTelemetry: StrokeTelemetry = {
     active: true,
@@ -439,7 +512,20 @@ async function boot(): Promise<void> {
   // Element placement & move/remove state
   let placingKind: ElementKind | null = null;
   const placingPos: Vec2 = { x: 96, y: 56 };
-  let movingElement: { id: string; kind: ElementKind; pointerId: number; x: number; y: number } | null = null;
+  // A held stone keeps the offset between its centre and the grab point, and follows only once the pointer has
+  // left the tap slop, so pressing a stone never makes it jump.
+  let movingElement: {
+    id: string;
+    kind: ElementKind;
+    pointerId: number;
+    x: number;
+    y: number;
+    offX: number;
+    offY: number;
+    startX: number;
+    startY: number;
+    dragging: boolean;
+  } | null = null;
   let nextElementSeq = 1;
 
   function uniqueElementId(kind: ElementKind): string {
@@ -457,17 +543,6 @@ async function boot(): Promise<void> {
   let deferredSweepBefore: GardenState | null = null;
   let hokiHoldStartMs: number | null = null;
 
-  // Watch-Gubba-rake animated preset playback (uses dedicated watchEngine to never collide with hand strokeEngine)
-  let watchPlayback: {
-    presetId: PresetId;
-    strokeIndex: number;
-    pointIndex: number;
-    segOffset: number;
-    startedStroke: boolean;
-    before: GardenState;
-  } | null = null;
-  const watchPointBuf: Vec2 = { x: 0, y: 0 };
-  const watchBatchBuf: Vec2[] = [watchPointBuf];
   const virtualPtBuf: Vec2 = { x: 0, y: 0 };
   const virtualBatchBuf: Vec2[] = [virtualPtBuf];
 
@@ -475,6 +550,52 @@ async function boot(): Promise<void> {
   const dirtyRect: SandRect = { x: 0, y: 0, w: 0, h: 0 };
   let sandDirty = false;
   let sandReset = true;
+
+  // Gubba mode and "Watch: Gubba rakes": the director says what Gubba does, the runner does it to the garden.
+  // Nothing here is a touch, so no haptic ever fires for it.
+  let announcedGubbaMode = false;
+  const runner = createAutoRunner(
+    store,
+    {
+      home: PROP_ORIGINS.gubba,
+      homeYaw: GUBBA_YAW,
+      basket: PROP_ORIGINS.basket,
+      shishi: PROP_ORIGINS.shishi,
+      rackSlots: RACK_SLOTS,
+      hangZ: HANG_Z,
+      footprints: ELEMENT_FOOTPRINTS,
+    },
+    {
+      sandDirty: markDirty,
+      sandReset: () => {
+        sandReset = true;
+      },
+      rakeClack: () => audio.playRakeClack(),
+      stoneThud: () => audio.playStoneThud(),
+      sweepWhoosh: (seconds) => audio.playSweepWhoosh(seconds),
+      foley: (telemetry, screenX) => audio.updateFoley(telemetry, screenX),
+      line: (pool) => {
+        stepGubbaInPlace(gubba, { type: pool }, clockMs);
+      },
+      changed: () => {
+        syncMirror();
+        if (runner.mode !== announcedGubbaMode) {
+          announcedGubbaMode = runner.mode;
+          mirror.say(announcedGubbaMode ? "Gubba mode on. Gubba is raking the garden." : "Gubba mode off.");
+        }
+        scheduleSave();
+      },
+    },
+    testMode ? 42 : Math.floor(Date.now() % 1_000_000),
+  );
+  const autoFrame: GardenAutoFrame = {
+    rake: null,
+    tip: { x: 0, y: 0, z: 0 },
+    grip: { x: 0, y: 0, z: 0 },
+    carried: null,
+    carriedPos: { x: 0, y: 0, z: 0 },
+    carriedYaw: 0,
+  };
 
   // Debounced persistence
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -484,7 +605,8 @@ async function boot(): Promise<void> {
       saveTimer = null;
     }
     try {
-      writeStorage(GARDEN_STORAGE_KEY, encodeGarden(store.garden));
+      // while Gubba is at work the garden worth keeping is the one the player left, not his half-raked one
+      writeStorage(GARDEN_STORAGE_KEY, encodeGarden(runner.before ?? store.garden));
     } catch {
       // Skip if over 64KB
     }
@@ -512,22 +634,53 @@ async function boot(): Promise<void> {
     }
   }
 
-  function stopWatchPlayback(commit: boolean, snapToGolden = false): void {
-    if (!watchPlayback) return;
-    const { presetId, before } = watchPlayback;
-    if (watchPlayback.startedStroke) {
-      watchEngine.end();
-      watchPlayback.startedStroke = false;
+  function syncMirror(): void {
+    mirror.sync({ settings, mood: currentMood, watchGubbaRake, gubbaMode: runner.mode });
+  }
+
+  /**
+   * The player is editing the garden: Gubba gives way. Gubba mode turns off, whatever he has done so far becomes
+   * one undo entry, and he walks his rake home. Called before every edit the player makes.
+   */
+  function yieldToPlayer(): void {
+    runner.yield(settings.rake);
+  }
+
+  /** Runs a sweep the player started to its end at once, as its one undo entry. */
+  function finishPlayerSweep(): void {
+    if (!sweepActive) return;
+    if (applySweep(store.garden.sand, sweepActive.prevElapsedMs, SWEEP_DURATION_MS)) sandReset = true;
+    store.commitSnapshot(sweepActive.before);
+    sweepActive = null;
+    deferredSweepBefore = null;
+    strokeStartedDuringSweep = false;
+    scheduleSave();
+  }
+
+  /** Finishes whatever the player has in hand, so Gubba starts from a settled garden. */
+  function settleForGubba(): void {
+    if (raking) finishStroke();
+    finishPlayerSweep();
+    playerRakeOut = false;
+    placingKind = null;
+    touchPlacingPointerId = null;
+    movingElement = null;
+  }
+
+  function setGubbaMode(on: boolean): void {
+    if (on === runner.mode) return;
+    if (on) {
+      settleForGubba();
+      // out of the way, so there is something to watch
+      panel = "none";
     }
-    if (snapToGolden) {
-      store.garden.elements = applyPreset(store.garden.sand, presetId);
-      sandReset = true;
-    }
-    if (commit) {
-      store.commitSnapshot(before);
-      scheduleSave();
-    }
-    watchPlayback = null;
+    runner.setMode(on, settings.rake, reducedMotion);
+  }
+
+  /** Has Gubba build a preset: the next garden in Gubba mode, or one "Watch" run. False if there is nothing to do. */
+  function requestGubbaPreset(presetId: PresetId): boolean {
+    settleForGubba();
+    return runner.request(presetId, reducedMotion);
   }
 
   function applyFramingForCurrentViewport(instant = false, presetChanged = false): void {
@@ -552,8 +705,11 @@ async function boot(): Promise<void> {
     const blocked = rotatePrompt !== null && needsLandscape(window.innerWidth, window.innerHeight);
     if (blocked === rotateBlocked) return;
     if (blocked) {
-      // release pointer captures and clear anything in progress so nothing fires under the prompt
+      // release pointer captures and finish any active stroke so nothing fires or leaks foley under the prompt
       releaseAllCaptures();
+      if (raking) finishStroke();
+      audio.updateFoley(null);
+      foleyStationarySilenced = true;
       activePointerId = null;
       hoverRake = null;
       hasPointerFb = false;
@@ -571,13 +727,28 @@ async function boot(): Promise<void> {
     applyRotateDom(blocked);
   }
 
+  // What the renderer was last sized for. Mobile browsers send resize events that change nothing (the address
+  // bar sliding, a visual-viewport update); those must not end a stroke or snap the camera.
+  let sizedW = 0;
+  let sizedH = 0;
+  let sizedDpr = 0;
+  let sizedDensity: PixelDensity | null = null;
+
   function updateViewportSize(): void {
-    if (raking) finishStroke();
     const dpr = window.devicePixelRatio || 1;
     const cssW = stage && stage.clientWidth > 0 ? stage.clientWidth : window.innerWidth;
     const cssH = stage && stage.clientHeight > 0 ? stage.clientHeight : window.innerHeight;
     const deviceW = Math.max(1, Math.round(cssW * dpr));
     const deviceH = Math.max(1, Math.round(cssH * dpr));
+    if (deviceW === sizedW && deviceH === sizedH && dpr === sizedDpr && settings.density === sizedDensity) {
+      updateRotatePrompt();
+      return;
+    }
+    sizedW = deviceW;
+    sizedH = deviceH;
+    sizedDpr = dpr;
+    sizedDensity = settings.density;
+    if (raking) finishStroke();
     renderer.resize(deviceW, deviceH, settings.density, dpr);
     applyFramingForCurrentViewport(true);
     updateRotatePrompt();
@@ -628,13 +799,14 @@ async function boot(): Promise<void> {
       audio.setMix(next.mix);
     }
 
-    mirror.sync({ settings, mood: currentMood, watchGubbaRake });
+    syncMirror();
     scheduleSave();
   }
 
-  function startSweep(): void {
+  function startSweep(source: HapticSource = "other"): void {
     if (sweepActive) return;
-    stopWatchPlayback(true);
+    yieldToPlayer();
+    if (raking) strokeSawSweep = true;
     if (reducedMotion) {
       if (store.sweep()) {
         sandReset = true;
@@ -649,50 +821,34 @@ async function boot(): Promise<void> {
       prevElapsedMs: 0,
       before: store.snapshot(),
     };
-    haptic(20);
+    haptics.trigger("sweep", source);
     audio.playSweepWhoosh(SWEEP_DURATION_MS / 1000);
     stepGubbaInPlace(gubba, { type: "sweep" }, clockMs);
   }
 
   function triggerPreset(presetId: PresetId): void {
     if (raking) finishStroke();
-    const originalBefore = sweepActive
-      ? sweepActive.before
-      : watchPlayback
-        ? watchPlayback.before
-        : store.snapshot();
+    panel = "none";
+    if (runner.mode || watchGubbaRake) {
+      // Gubba gets up and builds it. In Gubba mode he then carries on to gardens of his own choosing.
+      requestGubbaPreset(presetId);
+      return;
+    }
+    // An instant preset is the player's own edit
+    yieldToPlayer();
+    const before = sweepActive ? sweepActive.before : store.snapshot();
     sweepActive = null;
     deferredSweepBefore = null;
     strokeStartedDuringSweep = false;
-    stopWatchPlayback(false, false);
-
-    if (watchGubbaRake && PRESETS[presetId].strokes.length > 0) {
-      const preset = PRESETS[presetId];
-      clearSandGrid(store.garden.sand);
-      store.garden.elements = preset.elements.map((e) => ({ ...e }));
-      rebuildRockMask(store.garden.sand, store.garden.elements);
-      sandReset = true;
-      watchPlayback = {
-        presetId,
-        strokeIndex: 0,
-        pointIndex: 0,
-        segOffset: 0,
-        startedStroke: false,
-        before: originalBefore,
-      };
-      panel = "none";
-      return;
-    }
     store.garden.elements = applyPreset(store.garden.sand, presetId);
-    store.commitSnapshot(originalBefore);
+    store.commitSnapshot(before);
     sandReset = true;
-    panel = "none";
     scheduleSave();
   }
 
-  function selectRakeTool(id: RakeId): void {
+  function selectRakeTool(id: RakeId, source: HapticSource = "other"): void {
     if (id === "hoki") {
-      startSweep();
+      startSweep(source);
       return;
     }
     placingKind = null;
@@ -702,7 +858,9 @@ async function boot(): Promise<void> {
     if (settings.rake !== id) {
       syncSettings(setRake(settings, id));
     }
-    haptic(10);
+    // after the selection, so a rake Gubba is holding comes straight to the player's hand
+    yieldToPlayer();
+    haptics.trigger("select", source);
     audio.playRakeClack();
     stepGubbaInPlace(gubba, { type: "rake_selected", rakeId: id }, clockMs);
   }
@@ -742,8 +900,8 @@ async function boot(): Promise<void> {
     syncSettings(next);
   }
 
-  function handleOverlayAction(action: OverlayAction): void {
-    if (action.type !== "none") haptic(8);
+  function handleOverlayAction(action: OverlayAction, source: HapticSource = "other"): void {
+    if (action.type !== "none") haptics.trigger("tap", source);
     switch (action.type) {
       case "none":
         return;
@@ -761,29 +919,29 @@ async function boot(): Promise<void> {
         return;
       case "watch":
         watchGubbaRake = action.on;
-        mirror.sync({ settings, mood: currentMood, watchGubbaRake });
+        syncMirror();
+        return;
+      case "gubba_mode":
+        setGubbaMode(action.on);
         return;
       case "export":
         void triggerExport();
         return;
       case "place":
+        yieldToPlayer();
         placingKind = action.kind;
+        placingByTouch = lastPointerTouch;
+        if (placingByTouch) mirror.say(PLACE_HINTS[action.kind]);
         movingElement = null;
         panel = "none";
         return;
       case "hud":
         switch (action.id) {
           case "undo":
-            if (!raking && store.undo()) {
-              sandReset = true;
-              scheduleSave();
-            }
+            undoGarden();
             return;
           case "redo":
-            if (!raking && store.redo()) {
-              sandReset = true;
-              scheduleSave();
-            }
+            redoGarden();
             return;
           case "breath":
             syncSettings(toggleBreath(settings));
@@ -799,6 +957,25 @@ async function boot(): Promise<void> {
             return;
         }
     }
+  }
+
+  /** Undo and redo are edits: Gubba gives way first, so one undo takes back everything he did. */
+  function undoGarden(): boolean {
+    if (raking) return false;
+    yieldToPlayer();
+    if (!store.undo()) return false;
+    sandReset = true;
+    scheduleSave();
+    return true;
+  }
+
+  function redoGarden(): boolean {
+    if (raking) return false;
+    yieldToPlayer();
+    if (!store.redo()) return false;
+    sandReset = true;
+    scheduleSave();
+    return true;
   }
 
   function handleUiCommand(cmd: UiCommand): void {
@@ -824,7 +1001,9 @@ async function boot(): Promise<void> {
         panel = panel === "basket" ? "none" : "basket";
         return;
       case "place_element":
+        yieldToPlayer();
         placingKind = cmd.kind;
+        placingByTouch = false;
         movingElement = null;
         panel = "none";
         // Move focus off the hidden DOM mirror button so Arrow/Enter keys control stone placement cleanly
@@ -832,22 +1011,19 @@ async function boot(): Promise<void> {
         return;
       case "toggle_watch":
         watchGubbaRake = !watchGubbaRake;
-        mirror.sync({ settings, mood: currentMood, watchGubbaRake });
+        syncMirror();
+        return;
+      case "toggle_gubba_mode":
+        setGubbaMode(!runner.mode);
         return;
       case "adjust_mix":
         syncSettings(adjustMix(settings, cmd.channel, cmd.delta));
         return;
       case "undo":
-        if (!raking && store.undo()) {
-          sandReset = true;
-          scheduleSave();
-        }
+        undoGarden();
         return;
       case "redo":
-        if (!raking && store.redo()) {
-          sandReset = true;
-          scheduleSave();
-        }
+        redoGarden();
         return;
       case "toggle_breath":
         syncSettings(toggleBreath(settings));
@@ -903,6 +1079,7 @@ async function boot(): Promise<void> {
       case "virtual_toggle": {
         // Accessible keyboard placement confirmation when a basket item is selected
         if (placingKind !== null) {
+          yieldToPlayer();
           const id = uniqueElementId(placingKind);
           const fp = ELEMENT_FOOTPRINTS[placingKind];
           const ok = store.placeElement({
@@ -926,9 +1103,10 @@ async function boot(): Promise<void> {
         // Ignore Enter if a pointer drag stroke is currently active
         if (raking && !virtualDown) return;
         if (!virtualDown) {
-          stopWatchPlayback(true);
+          yieldToPlayer();
           virtualDown = true;
           raking = true;
+          strokeEngineBegun = true;
           strokeStartedDuringSweep = sweepActive !== null;
           hasRakeHead = true;
           strokeEngine.begin(rakeHeadBuf, RAKE_BY_ID[settings.rake], "mouse", {
@@ -952,6 +1130,7 @@ async function boot(): Promise<void> {
         virtualPtBuf.x = Math.max(0, Math.min(191, rakeHeadBuf.x + cmd.dx * step));
         virtualPtBuf.y = Math.max(0, Math.min(111, rakeHeadBuf.y + cmd.dy * step));
         hasRakeHead = true;
+        playerRakeOut = true;
         if (virtualDown) {
           const tel = strokeEngine.extend(virtualBatchBuf, 16.67);
           rakeHeadBuf.x = tel.head.x;
@@ -973,7 +1152,7 @@ async function boot(): Promise<void> {
   }
 
   const mirror = createDomMirror(document, handleUiCommand);
-  mirror.sync({ settings, mood: currentMood });
+  syncMirror();
   bindKeyboard(window, handleUiCommand);
 
   let firstVisitDone = false;
@@ -1010,14 +1189,25 @@ async function boot(): Promise<void> {
     return p !== null && p.x >= 0 && p.x < 192 && p.y >= 0 && p.y < 112;
   }
 
+  /** True within `margin` cells of the bed, which covers its wooden frame. */
+  function isNearBed(p: Vec2 | null, margin: number): p is Vec2 {
+    return p !== null && p.x >= -margin && p.x < 192 + margin && p.y >= -margin && p.y < 112 + margin;
+  }
+
   function finishStroke(): void {
     if (!raking) return;
     raking = false;
     virtualDown = false;
     activePointerId = null;
-    const patch = strokeEngine.end();
     const hadSweepOverlap = strokeStartedDuringSweep;
     strokeStartedDuringSweep = false;
+    if (!strokeEngineBegun) {
+      audio.updateFoley(null);
+      foleyStationarySilenced = true;
+      return;
+    }
+    strokeEngineBegun = false;
+    const patch = strokeEngine.end();
 
     if (deferredSweepBefore !== null) {
       // Sweep finished while this stroke was still held: commit one unified snapshot from pre-sweep state
@@ -1037,6 +1227,123 @@ async function boot(): Promise<void> {
     foleyStationarySilenced = true;
   }
 
+  /**
+   * Ends the stroke that a second finger interrupts. Two fingers never land together: the first arrives a few
+   * frames early and, on the sand, begins a stroke. If that stroke is only moments old or has barely moved it
+   * was the start of a pinch, so its marks are rolled back and nothing reaches the undo history. A stroke that
+   * was clearly under way is kept and committed as usual.
+   */
+  function endStrokeForSecondFinger(nowTs: number): void {
+    if (!strokeEngineBegun) {
+      raking = false;
+      activePointerId = null;
+      strokeStartedDuringSweep = false;
+      audio.updateFoley(null);
+      foleyStationarySilenced = true;
+      return;
+    }
+    const pinchStart =
+      activePointerType === "touch" &&
+      !virtualDown &&
+      !strokeSawSweep &&
+      deferredSweepBefore === null &&
+      (nowTs - strokeDownTs < PINCH_GRACE_MS || strokeTravelPx < PINCH_TRAVEL_PX);
+    if (!pinchStart) {
+      finishStroke();
+      return;
+    }
+    raking = false;
+    strokeEngineBegun = false;
+    activePointerId = null;
+    strokeStartedDuringSweep = false;
+    const patch = strokeEngine.end();
+    const { x, y, w, h } = patch.rect;
+    if (w > 0 && h > 0) {
+      const sand = store.garden.sand;
+      for (let row = 0; row < h; row++) {
+        const target = (y + row) * sand.w + x;
+        sand.height.set(patch.beforeHeight.subarray(row * w, (row + 1) * w), target);
+        sand.dir.set(patch.beforeDir.subarray(row * w, (row + 1) * w), target);
+      }
+      markDirty(patch.rect);
+    }
+    audio.updateFoley(null);
+    foleyStationarySilenced = true;
+  }
+
+  /** Shows the held rake where the stroke engine has it. */
+  function showStroke(tel: StrokeTelemetry): void {
+    if (activePointerType === "touch" && !virtualDown) {
+      // A finger can slide far past the bed (the wall and sky map to sand points hundreds of cells away); the
+      // stroke keeps those points, but the rake itself waits at the rim.
+      const m = TOUCH_RAKE_VISUAL_MARGIN_CELLS;
+      rakeHeadBuf.x = Math.max(-m, Math.min(192 + m, tel.head.x));
+      rakeHeadBuf.y = Math.max(-m, Math.min(112 + m, tel.head.y));
+    } else {
+      rakeHeadBuf.x = tel.head.x;
+      rakeHeadBuf.y = tel.head.y;
+    }
+    rakeHeading = tel.heading;
+    // Keep the hover handle where the stroke left it, so the next hover continues from this heading
+    hoverTailBuf.x = tel.tail.x;
+    hoverTailBuf.y = tel.tail.y;
+  }
+
+  /** CSS pixels on the canvas as framebuffer pixels, capped so a touch search stays small at any density. */
+  function touchRadiusFb(cssPx: number): number {
+    const r = canvasEl.getBoundingClientRect();
+    return Math.min(TOUCH_SEARCH_MAX_FB, (cssPx * renderer.fbW) / Math.max(1, r.width));
+  }
+
+  /** The HUD or menu control nearest a touch that landed just outside every control, or null. */
+  function touchOverlayHit(fbX: number, fbY: number, hudOnly = false): OverlayAction | null {
+    const radius = touchRadiusFb(TOUCH_OVERLAY_SLOP_PX);
+    const r2 = radius * radius;
+    for (let i = 2; i < TOUCH_SEARCH_OFFSETS.length; i += 2) {
+      const dx = TOUCH_SEARCH_OFFSETS[i]!;
+      const dy = TOUCH_SEARCH_OFFSETS[i + 1]!;
+      if (dx * dx + dy * dy > r2) break;
+      const action = renderer.overlayHit(fbX + dx, fbY + dy);
+      if (action !== null && action.type !== "none" && (!hudOnly || action.type === "hud")) return action;
+    }
+    return null;
+  }
+
+  /**
+   * The pickable object nearest a touch that landed on none: a hanging rake's handle is one or two framebuffer
+   * pixels wide, far thinner than a thumb. Each probe reads one G-buffer pixel, so only every other row is
+   * sampled; every column is, which still finds an upright handle a single pixel wide.
+   */
+  function touchPick(fbX: number, fbY: number): PickResult {
+    const radius = touchRadiusFb(TOUCH_PICK_RADIUS_PX);
+    const r2 = radius * radius;
+    for (let i = 2; i < TOUCH_SEARCH_OFFSETS.length; i += 2) {
+      const dx = TOUCH_SEARCH_OFFSETS[i]!;
+      const dy = TOUCH_SEARCH_OFFSETS[i + 1]!;
+      if (dx * dx + dy * dy > r2) break;
+      if (dy & 1) continue;
+      // Stones are wide enough to press directly, and a near miss beside one is usually a stroke around it
+      const picked = renderer.pick(fbX + dx, fbY + dy);
+      if (picked.kind !== "none" && picked.kind !== "element") return picked;
+    }
+    return NOTHING_PICKED;
+  }
+
+  /** Forgets every touch gesture in progress; a stroke under way is kept. */
+  function resetTouchGestures(): void {
+    if (raking && !virtualDown && activePointerType === "touch") finishStroke();
+    if (touchRakeHold && hoverRake === touchRakeHold.id) hoverRake = null;
+    if (hokiTouchHold && hoverRake === "hoki") hoverRake = null;
+    if (hokiTouchHold) hokiHoldStartMs = null;
+    activeTouches.clear();
+    orbitDrag = null;
+    pinchDist = null;
+    touchRakeHold = null;
+    hokiTouchHold = null;
+    movingElement = null;
+    touchPlacingPointerId = null;
+  }
+
   canvas.addEventListener("contextmenu", (ev) => {
     ev.preventDefault();
   });
@@ -1049,23 +1356,38 @@ async function boot(): Promise<void> {
   canvas.addEventListener("pointerdown", (ev) => {
     if (rotateBlocked) return;
     unlockAudioIfNeeded();
-    if (ev.pointerType === "touch") {
+    const touch = ev.pointerType === "touch";
+    const source = hapticSource(ev.pointerType);
+    lastPointerTouch = touch;
+    if (touch) {
+      // A primary touch is by definition the only finger down. Anything still tracked is a lift that never
+      // reached the page, and would otherwise turn every later touch into the second finger of a pinch.
+      if (ev.isPrimary && activeTouches.size > 0) resetTouchGestures();
       // Touch browsers apply implicit pointer capture on pointerdown; track every finger so rotate can release it.
       capturedPointers.add(ev.pointerId);
       activeTouches.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+      // A third finger never starts a gesture of its own under a pinch
+      if (activeTouches.size > 2) return;
       if (activeTouches.size === 2) {
-        if (raking) finishStroke();
+        if (raking) endStrokeForSecondFinger(ev.timeStamp);
+        if (touchRakeHold && hoverRake === touchRakeHold.id) hoverRake = null;
+        if (hokiTouchHold && hoverRake === "hoki") hoverRake = null;
         touchRakeHold = null;
         touchPreviewTag = null;
         hokiHoldStartMs = null;
         hokiTouchHold = null;
         movingElement = null;
         touchPlacingPointerId = null;
-        const pts = [...activeTouches.values()];
-        pinchDist = Math.hypot(pts[1]!.x - pts[0]!.x, pts[1]!.y - pts[0]!.y);
-        const cx = (pts[0]!.x + pts[1]!.x) * 0.5;
-        const cy = (pts[0]!.y + pts[1]!.y) * 0.5;
-        orbitDrag = { pointerId: ev.pointerId, startX: cx, startY: cy, az: orbitRig.az, el: orbitRig.el, twoFinger: true };
+        let cx = 0;
+        let cy = 0;
+        let first: { x: number; y: number } | null = null;
+        for (const pt of activeTouches.values()) {
+          cx += pt.x * 0.5;
+          cy += pt.y * 0.5;
+          if (first === null) first = pt;
+          else pinchDist = Math.hypot(pt.x - first.x, pt.y - first.y);
+        }
+        orbitDrag = { pointerId: ev.pointerId, lastX: cx, lastY: cy, engaged: true, twoFinger: true };
         return;
       }
     }
@@ -1075,11 +1397,22 @@ async function boot(): Promise<void> {
     pointerFbBuf.y = fb.y;
     hasPointerFb = true;
 
-    // 1. Check pixel overlay (HUD / Settings / Basket tray) first
-    const ovAction = renderer.overlayHit(fb.x, fb.y);
+    // 1. Check pixel overlay (HUD / Settings / Basket tray) first; a thumb just off a control still presses it.
+    //    Inside an open panel, empty paper returns { type: "none" } so snap to a nearby chip/tab/pip; outside
+    //    an open panel, only allow HUD slop so tapping outside to dismiss never snags an edge panel chip.
+    let ovAction = renderer.overlayHit(fb.x, fb.y);
+    if (touch) {
+      if (ovAction !== null && ovAction.type === "none") {
+        const snapped = touchOverlayHit(fb.x, fb.y);
+        if (snapped !== null) ovAction = snapped;
+      } else if (ovAction === null) {
+        const snapped = touchOverlayHit(fb.x, fb.y, panel !== "none");
+        if (snapped !== null) ovAction = snapped;
+      }
+    }
     if (ovAction !== null) {
       touchPreviewTag = null;
-      handleOverlayAction(ovAction);
+      handleOverlayAction(ovAction, source);
       return;
     }
 
@@ -1088,10 +1421,11 @@ async function boot(): Promise<void> {
       panel = "none";
     }
 
+    const sp = renderer.sandPoint(fb.x, fb.y);
+
     // 2. Active stone placement mode (touch supports drag-to-aim and release-to-drop; mouse drops on click)
     if (placingKind !== null) {
-      const sp = renderer.sandPoint(fb.x, fb.y);
-      if (ev.pointerType === "touch") {
+      if (touch) {
         if (isInsideBed(sp)) {
           placingPos.x = Math.max(0, Math.min(191, Math.round(sp.x)));
           placingPos.y = Math.max(0, Math.min(111, Math.round(sp.y)));
@@ -1104,6 +1438,7 @@ async function boot(): Promise<void> {
         return;
       }
       if (isInsideBed(sp)) {
+        yieldToPlayer();
         const id = uniqueElementId(placingKind);
         const fp = ELEMENT_FOOTPRINTS[placingKind];
         const ok = store.placeElement({
@@ -1117,7 +1452,6 @@ async function boot(): Promise<void> {
         });
         if (ok) {
           sandReset = true;
-          haptic(15);
           audio.playStoneThud();
           stepGubbaInPlace(gubba, { type: "stone_placed" }, clockMs);
           scheduleSave();
@@ -1127,23 +1461,27 @@ async function boot(): Promise<void> {
       return;
     }
 
-    // 3. Pick 3D object via G-buffer part-id
-    const picked = renderer.pick(fb.x, fb.y);
+    // 3. Pick 3D object via G-buffer part-id. A touch that lands on nothing, off the sand, takes the nearest
+    //    object within a thumb's reach instead of orbiting; on the sand a touch always rakes.
+    let picked = renderer.pick(fb.x, fb.y);
+    if (touch && picked.kind === "none" && !isInsideBed(sp)) picked = touchPick(fb.x, fb.y);
     if (picked.kind === "rake" && picked.id) {
       const rid = picked.id as RakeId;
       if (rid === "hoki") {
         // DESIGN.md 3.7: Hōki requires a 0.8 s hold to sweep; show its description immediately on touch
         hokiHoldStartMs = clockMs;
-        if (ev.pointerType === "touch") {
+        if (touch) {
           hokiTouchHold = { pointerId: ev.pointerId, startX: ev.clientX, startY: ev.clientY };
           hoverRake = "hoki";
           touchPreviewTag = { id: "hoki", untilMs: clockMs + TOUCH_PREVIEW_LINGER_MS };
           mirror.say(HOVER_TAGS.hoki);
         }
         capturePointer(ev.pointerId);
-      } else if (ev.pointerType === "touch") {
-        // Touch: quick tap selects the rake; holding >= 350 ms previews its description without switching
+      } else if (touch) {
+        // Touch: the rake lifts under the thumb at once; a quick tap selects it, and holding >= 350 ms previews
+        // its description without switching
         touchPreviewTag = null;
+        hoverRake = rid;
         touchRakeHold = {
           id: rid,
           pointerId: ev.pointerId,
@@ -1161,13 +1499,14 @@ async function boot(): Promise<void> {
     }
     touchPreviewTag = null;
     if (picked.kind === "gubba") {
-      haptic(10);
+      haptics.trigger("tap", source);
       stepGubbaInPlace(gubba, { type: "gubba_tapped", activeRake: settings.rake }, clockMs);
       const updated = withHeardStories(settings, gubba.heardStories);
       if (updated !== settings) syncSettings(updated);
       return;
     }
     if (picked.kind === "basket") {
+      haptics.trigger("tap", source);
       panel = wasBasket ? "none" : "basket";
       return;
     }
@@ -1175,42 +1514,68 @@ async function boot(): Promise<void> {
     if (picked.kind === "element" && picked.id) {
       const existing = store.garden.elements.find((e) => e.id === picked.id);
       if (existing) {
+        // taking hold of a stone is the player's edit, even before it moves
+        yieldToPlayer();
         movingElement = {
           id: existing.id,
           kind: existing.kind,
           pointerId: ev.pointerId,
           x: existing.x,
           y: existing.y,
+          offX: sp ? existing.x - sp.x : 0,
+          offY: sp ? existing.y - sp.y : 0,
+          startX: ev.clientX,
+          startY: ev.clientY,
+          dragging: false,
         };
         capturePointer(ev.pointerId);
         return;
       }
     }
 
-    // 5. Clicking on the sand bed starts a rake stroke
-    const sp = renderer.sandPoint(fb.x, fb.y);
-    if (isInsideBed(sp)) {
+    // 5. Pressing on the sand bed starts a rake stroke. A thumb aiming at the edge of the bed often lands on
+    //    its frame, so a touch there starts the stroke too; points outside the grid are kept and clipped.
+    //    For touch, defer yielding Gubba and starting the stroke engine until the finger clears TOUCH_SLOP_PX,
+    //    so accidental taps and two-finger pinches over the sand never interrupt Gubba mode or Watch playback.
+    if (isInsideBed(sp) || (touch && isNearBed(sp, TOUCH_BED_MARGIN_CELLS))) {
       if (virtualDown) finishStroke();
-      stopWatchPlayback(true);
       activePointerId = ev.pointerId;
-      activePointerType = ev.pointerType === "touch" ? "touch" : ev.pointerType === "pen" ? "pen" : "mouse";
+      activePointerType = touch ? "touch" : ev.pointerType === "pen" ? "pen" : "mouse";
       raking = true;
       strokeStartedDuringSweep = sweepActive !== null;
+      strokeSawSweep = sweepActive !== null;
+      strokeCarving = false;
+      strokeDownTs = ev.timeStamp;
+      strokeTravelPx = 0;
+      strokeLastClientX = ev.clientX;
+      strokeLastClientY = ev.clientY;
+      strokePressSand.x = sp.x;
+      strokePressSand.y = sp.y;
+      resetTouchBrush(touchBrush, ev.clientX, ev.clientY);
       capturePointer(ev.pointerId);
+      if (touch) {
+        strokeEngineBegun = false;
+        if (!runner.mode && runner.before === null) {
+          rakeHeadBuf.x = sp.x;
+          rakeHeadBuf.y = sp.y;
+          hasRakeHead = true;
+        }
+        return;
+      }
+      yieldToPlayer();
+      strokeEngineBegun = true;
       const rakeSpec = RAKE_BY_ID[settings.rake];
-      const deflected = deflect(sp, store.garden.elements);
-      rakeHeadBuf.x = deflected.x;
-      rakeHeadBuf.y = deflected.y;
       hasRakeHead = true;
       strokeEngine.begin(sp, rakeSpec, activePointerType, {
         stones: store.garden.elements,
         flow: settings.flow,
         heading: rakeHeading,
       });
-      const tel = strokeEngine.extend([sp], 16.67);
-      rakeHeadBuf.x = tel.head.x;
-      rakeHeadBuf.y = tel.head.y;
-      rakeHeading = tel.heading;
+      strokePts.length = 0;
+      strokePts.push(sp);
+      const tel = strokeEngine.extend(strokePts, 16.67);
+      strokeCarving = tel.active;
+      showStroke(tel);
       markDirty(tel.dirtyRect);
       if (tel.hitStone) audio.playStoneThud();
       lastFoleyMoveMs = clockMs;
@@ -1220,36 +1585,42 @@ async function boot(): Promise<void> {
       return;
     }
 
-    // 6. Dragging anywhere else (deck, wall, sky) orbits the camera
-    orbitDrag = {
-      pointerId: ev.pointerId,
-      startX: ev.clientX,
-      startY: ev.clientY,
-      az: orbitRig.az,
-      el: orbitRig.el,
-    };
+    // 6. Dragging anywhere else (deck, wall, sky) orbits the camera; a touch has to leave the tap slop first
+    orbitDrag = { pointerId: ev.pointerId, lastX: ev.clientX, lastY: ev.clientY, engaged: !touch };
     capturePointer(ev.pointerId);
   });
 
   canvas.addEventListener("pointermove", (ev) => {
     if (rotateBlocked) return;
-    if (ev.pointerType === "touch" && activeTouches.has(ev.pointerId)) {
-      activeTouches.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
-      if (activeTouches.size === 2 && orbitDrag) {
-        const pts = [...activeTouches.values()];
-        const d = Math.hypot(pts[1]!.x - pts[0]!.x, pts[1]!.y - pts[0]!.y);
-        const cx = (pts[0]!.x + pts[1]!.x) * 0.5;
-        const cy = (pts[0]!.y + pts[1]!.y) * 0.5;
+    const tracked = ev.pointerType === "touch" ? activeTouches.get(ev.pointerId) : undefined;
+    if (tracked) {
+      tracked.x = ev.clientX;
+      tracked.y = ev.clientY;
+      if (activeTouches.size === 2 && orbitDrag?.twoFinger) {
+        let cx = 0;
+        let cy = 0;
+        let d = 0;
+        let first: { x: number; y: number } | null = null;
+        for (const pt of activeTouches.values()) {
+          cx += pt.x * 0.5;
+          cy += pt.y * 0.5;
+          if (first === null) first = pt;
+          else d = Math.hypot(pt.x - first.x, pt.y - first.y);
+        }
         const nextDist = pinchDist ? orbitRig.dist * (pinchDist / Math.max(10, d)) : orbitRig.dist;
         pinchDist = d;
         orbitTo({
           ...orbitRig,
-          az: orbitDrag.az - (cx - orbitDrag.startX) * 0.005,
-          el: orbitDrag.el + (cy - orbitDrag.startY) * 0.005,
+          az: orbitRig.az - (cx - orbitDrag.lastX) * 0.005,
+          el: orbitRig.el + (cy - orbitDrag.lastY) * 0.005,
           dist: nextDist,
         });
+        orbitDrag.lastX = cx;
+        orbitDrag.lastY = cy;
         return;
       }
+      // Under a pinch or with extra fingers down, a finger that owns no gesture does nothing
+      if (activeTouches.size > 1 && ev.pointerId !== activePointerId) return;
     }
 
     const fb = renderer.clientToFramebuffer(ev.clientX, ev.clientY);
@@ -1290,10 +1661,16 @@ async function boot(): Promise<void> {
 
     // Moving an existing placed element
     if (movingElement && ev.pointerId === movingElement.pointerId) {
+      if (!movingElement.dragging) {
+        const slop = ev.pointerType === "touch" ? TOUCH_SLOP_PX : MOUSE_DRAG_SLOP_PX;
+        if (Math.hypot(ev.clientX - movingElement.startX, ev.clientY - movingElement.startY) < slop) return;
+        movingElement.dragging = true;
+        haptics.trigger("tap", hapticSource(ev.pointerType));
+      }
       const sp = renderer.sandPoint(fb.x, fb.y);
       if (sp) {
-        movingElement.x = Math.max(0, Math.min(191, Math.round(sp.x)));
-        movingElement.y = Math.max(0, Math.min(111, Math.round(sp.y)));
+        movingElement.x = Math.max(0, Math.min(191, Math.round(sp.x + movingElement.offX)));
+        movingElement.y = Math.max(0, Math.min(111, Math.round(sp.y + movingElement.offY)));
       }
       return;
     }
@@ -1302,24 +1679,64 @@ async function boot(): Promise<void> {
     if (raking && !virtualDown && (activePointerId === null || ev.pointerId === activePointerId)) {
       const coalesced = typeof ev.getCoalescedEvents === "function" ? ev.getCoalescedEvents() : [];
       const events = coalesced.length > 0 ? coalesced : [ev];
-      const pts: Vec2[] = [];
+      const touchStroke = activePointerType === "touch";
+      strokePts.length = 0;
       for (const ce of events) {
-        const cfb = renderer.clientToFramebuffer(ce.clientX, ce.clientY);
+        let cx = ce.clientX;
+        let cy = ce.clientY;
+        if (touchStroke) {
+          // A finger is steadied before it reaches the sand: nothing inside the tap slop, then a short string
+          if (!Number.isFinite(cx) || !Number.isFinite(cy)) continue;
+          strokeTravelPx += Math.hypot(cx - strokeLastClientX, cy - strokeLastClientY);
+          strokeLastClientX = cx;
+          strokeLastClientY = cy;
+          if (!pullTouchBrush(touchBrush, cx, cy, TOUCH_SLOP_PX, TOUCH_BRUSH_RADIUS_PX)) continue;
+          cx = touchBrush.x;
+          cy = touchBrush.y;
+        }
+        const cfb = renderer.clientToFramebuffer(cx, cy);
         const sp = renderer.sandPoint(cfb.x, cfb.y);
-        if (sp) pts.push(sp);
+        if (!sp) continue;
+        if (touchStroke) {
+          // A finger sliding up the wall toward the sky maps to sand points thousands of cells away, and each
+          // cell of that path is a stamp. Nothing beyond the reach can touch the bed, so stop there.
+          sp.x = Math.max(-TOUCH_STROKE_REACH_CELLS, Math.min(192 + TOUCH_STROKE_REACH_CELLS, sp.x));
+          sp.y = Math.max(-TOUCH_STROKE_REACH_CELLS, Math.min(112 + TOUCH_STROKE_REACH_CELLS, sp.y));
+        }
+        strokePts.push(sp);
       }
-      if (pts.length > 0) {
-        const tel = strokeEngine.extend(pts, 16.67);
-        rakeHeadBuf.x = tel.head.x;
-        rakeHeadBuf.y = tel.head.y;
-        rakeHeading = tel.heading;
+      if (touchStroke && !strokeCarving && strokePts.length === 0) {
+        // Before a touch stroke starts to carve, turn the waiting rake the way the finger is heading, so it does
+        // not whip round on the first carved cell
+        const sp = renderer.sandPoint(fb.x, fb.y);
+        const moved = Math.hypot(ev.clientX - touchBrush.pressX, ev.clientY - touchBrush.pressY);
+        if (sp && moved >= TOUCH_BRUSH_RADIUS_PX) {
+          rakeHeading = Math.atan2(sp.y - strokePressSand.y, sp.x - strokePressSand.x);
+        }
+      }
+      if (strokePts.length > 0) {
+        if (!strokeEngineBegun) {
+          yieldToPlayer();
+          strokeEngineBegun = true;
+          strokeStartedDuringSweep = sweepActive !== null;
+          strokeSawSweep = sweepActive !== null;
+          hasRakeHead = true;
+          strokeEngine.begin(strokePressSand, RAKE_BY_ID[settings.rake], activePointerType, {
+            stones: store.garden.elements,
+            flow: settings.flow,
+            heading: rakeHeading,
+          });
+        }
+        const wasCarving = strokeCarving;
+        const tel = strokeEngine.extend(strokePts, 16.67);
+        strokeCarving = tel.active;
+        showStroke(tel);
         markDirty(tel.dirtyRect);
+        // The finger has left the tap slop and the rake bites: once per stroke, and only for a finger
+        if (touchStroke && !wasCarving && strokeCarving) haptics.trigger("strokeStart", "touch");
         if (tel.hitStone) {
           audio.playStoneThud();
-          if (clockMs - lastStoneHapticMs >= HAPTIC_STONE_COOLDOWN_MS) {
-            lastStoneHapticMs = clockMs;
-            haptic(14);
-          }
+          if (touchStroke) haptics.trigger("stoneBrush", "touch");
         }
         lastFoleyMoveMs = clockMs;
         lastFoleyScreenX = fb.x / Math.max(1, renderer.fbW);
@@ -1331,13 +1748,24 @@ async function boot(): Promise<void> {
 
     // Active orbit drag
     if (orbitDrag && ev.pointerId === orbitDrag.pointerId) {
-      orbitTo({
-        ...orbitRig,
-        az: orbitDrag.az - (ev.clientX - orbitDrag.startX) * 0.006,
-        el: orbitDrag.el + (ev.clientY - orbitDrag.startY) * 0.006,
-      });
+      if (!orbitDrag.engaged) {
+        // A tap on the deck or wall leaves the camera alone; the orbit picks up from where the slop ends
+        if (Math.hypot(ev.clientX - orbitDrag.lastX, ev.clientY - orbitDrag.lastY) < TOUCH_SLOP_PX) return;
+        orbitDrag.engaged = true;
+      } else {
+        orbitTo({
+          ...orbitRig,
+          az: orbitRig.az - (ev.clientX - orbitDrag.lastX) * 0.006,
+          el: orbitRig.el + (ev.clientY - orbitDrag.lastY) * 0.006,
+        });
+      }
+      orbitDrag.lastX = ev.clientX;
+      orbitDrag.lastY = ev.clientY;
       return;
     }
+
+    // A finger has no hover: everything below is for a mouse or pen moving with no button held
+    if (ev.pointerType === "touch") return;
 
     // Placement ghost
     if (placingKind !== null) {
@@ -1374,8 +1802,10 @@ async function boot(): Promise<void> {
         rakeHeadBuf.x = def.x;
         rakeHeadBuf.y = def.y;
         hasRakeHead = true;
+        playerRakeOut = true;
         canvas.style.cursor = "none";
       } else {
+        playerRakeOut = false;
         canvas.style.cursor =
           hoverRake !== null ||
           picked.kind === "gubba" ||
@@ -1386,8 +1816,12 @@ async function boot(): Promise<void> {
       }
     } else {
       hoverRake = null;
+      playerRakeOut = false;
       canvas.style.cursor = "pointer";
     }
+  });
+  canvas.addEventListener("pointerleave", (ev) => {
+    if (ev.pointerType !== "touch") playerRakeOut = false;
   });
 
   function onPointerUp(ev: PointerEvent): void {
@@ -1413,15 +1847,15 @@ async function boot(): Promise<void> {
         hold.previewed ||
         clockMs - hold.startMs >= TOUCH_RAKE_HOLD_MS ||
         ev.timeStamp - hold.startEventTs >= TOUCH_RAKE_HOLD_MS;
+      if (hoverRake === hold.id) hoverRake = null;
       if (!heldLong) {
-        selectRakeTool(hold.id);
+        selectRakeTool(hold.id, "touch");
       } else {
         if (!hold.previewed) {
           mirror.say(HOVER_TAGS[hold.id]);
-          haptic(12);
+          haptics.trigger("preview", "touch");
         }
         touchPreviewTag = { id: hold.id, untilMs: clockMs + TOUCH_PREVIEW_LINGER_MS };
-        if (hoverRake === hold.id) hoverRake = null;
       }
       return;
     }
@@ -1430,6 +1864,7 @@ async function boot(): Promise<void> {
       const fb = renderer.clientToFramebuffer(ev.clientX, ev.clientY);
       const sp = renderer.sandPoint(fb.x, fb.y);
       if (isInsideBed(sp)) {
+        yieldToPlayer();
         const id = uniqueElementId(placingKind);
         const fp = ELEMENT_FOOTPRINTS[placingKind];
         const ok = store.placeElement({
@@ -1443,7 +1878,7 @@ async function boot(): Promise<void> {
         });
         if (ok) {
           sandReset = true;
-          haptic(15);
+          haptics.trigger("thud", "touch");
           audio.playStoneThud();
           stepGubbaInPlace(gubba, { type: "stone_placed" }, clockMs);
           scheduleSave();
@@ -1455,25 +1890,36 @@ async function boot(): Promise<void> {
     }
 
     if (movingElement && ev.pointerId === movingElement.pointerId) {
+      const moving = movingElement;
+      movingElement = null;
+      // A press that never left the tap slop was not a drag: the stone stays exactly where it is
+      if (!moving.dragging) return;
+      yieldToPlayer();
       const fb = renderer.clientToFramebuffer(ev.clientX, ev.clientY);
-      const picked = renderer.pick(fb.x, fb.y);
+      let picked = renderer.pick(fb.x, fb.y);
+      if (ev.pointerType === "touch" && picked.kind !== "basket") {
+        const near = touchPick(fb.x, fb.y);
+        if (near.kind === "basket") picked = near;
+      }
       const sp = renderer.sandPoint(fb.x, fb.y);
-      if (picked.kind === "basket" || !isInsideBed(sp)) {
-        if (store.removeElement(movingElement.id)) {
+      // The stone lands where it was carried to, which is the release point less the original grab offset
+      const tx = sp ? Math.round(sp.x + moving.offX) : -1;
+      const ty = sp ? Math.round(sp.y + moving.offY) : -1;
+      if (picked.kind === "basket" || tx < 0 || tx >= 192 || ty < 0 || ty >= 112) {
+        if (store.removeElement(moving.id)) {
           sandReset = true;
-          haptic(15);
+          haptics.trigger("thud", hapticSource(ev.pointerType));
           audio.playStoneThud();
           scheduleSave();
         }
       } else {
-        if (store.moveElement(movingElement.id, Math.round(sp.x), Math.round(sp.y))) {
+        if (store.moveElement(moving.id, tx, ty)) {
           sandReset = true;
-          haptic(15);
+          haptics.trigger("thud", hapticSource(ev.pointerType));
           audio.playStoneThud();
           scheduleSave();
         }
       }
-      movingElement = null;
       return;
     }
 
@@ -1555,6 +2001,7 @@ async function boot(): Promise<void> {
     sweepProgress: null,
     rain: settings.rain,
     placing: null,
+    auto: autoFrame,
   };
 
   const overlayState: OverlayState = {
@@ -1564,73 +2011,13 @@ async function boot(): Promise<void> {
     panel: "none",
     tab: "look",
     watchGubbaRake: false,
+    gubbaMode: false,
     elementCount: store.garden.elements.length,
     maxElements: MAX_ELEMENTS,
     pointer: null,
   };
 
   const placingBuf = { kind: "stone_m" as ElementKind, x: 96, y: 56, rotation: 0 };
-
-  function stepWatchPlayback(dtMs: number): void {
-    if (!watchPlayback) return;
-    const preset = PRESETS[watchPlayback.presetId];
-    let budget = (WATCH_SPEED_CELLS_PER_SEC * dtMs) / 1000;
-    while (budget > 0 && watchPlayback) {
-      const strokeDef = preset.strokes[watchPlayback.strokeIndex];
-      if (!strokeDef || strokeDef.points.length < 2) {
-        stopWatchPlayback(true, true);
-        return;
-      }
-      const rakeSpec = RAKE_BY_ID[strokeDef.rake];
-      if (!watchPlayback.startedStroke) {
-        const p0 = strokeDef.points[0]!;
-        watchEngine.begin(p0, rakeSpec, "mouse", {
-          stones: store.garden.elements,
-          flow: true, // Always match applyPreset() golden replay
-        });
-        watchPlayback.startedStroke = true;
-        watchPlayback.pointIndex = 0;
-        watchPlayback.segOffset = 0;
-      }
-      const a = strokeDef.points[watchPlayback.pointIndex]!;
-      const b = strokeDef.points[watchPlayback.pointIndex + 1];
-      if (!b) {
-        watchEngine.end();
-        watchPlayback.startedStroke = false;
-        watchPlayback.strokeIndex++;
-        watchPlayback.pointIndex = 0;
-        watchPlayback.segOffset = 0;
-        continue;
-      }
-      const segLen = Math.hypot(b.x - a.x, b.y - a.y);
-      const rem = segLen - watchPlayback.segOffset;
-      if (budget >= rem) {
-        budget -= rem;
-        watchPointBuf.x = b.x;
-        watchPointBuf.y = b.y;
-        const tel = watchEngine.extend(watchBatchBuf, dtMs);
-        rakeHeadBuf.x = tel.head.x;
-        rakeHeadBuf.y = tel.head.y;
-        hasRakeHead = true;
-        rakeHeading = tel.heading;
-        markDirty(tel.dirtyRect);
-        watchPlayback.pointIndex++;
-        watchPlayback.segOffset = 0;
-      } else {
-        watchPlayback.segOffset += budget;
-        const t = segLen > 0 ? watchPlayback.segOffset / segLen : 1;
-        watchPointBuf.x = a.x + (b.x - a.x) * t;
-        watchPointBuf.y = a.y + (b.y - a.y) * t;
-        const tel = watchEngine.extend(watchBatchBuf, dtMs);
-        rakeHeadBuf.x = tel.head.x;
-        rakeHeadBuf.y = tel.head.y;
-        hasRakeHead = true;
-        rakeHeading = tel.heading;
-        markDirty(tel.dirtyRect);
-        budget = 0;
-      }
-    }
-  }
 
   function stepFrame(dtMs: number, doRender = true): void {
     clockMs += dtMs;
@@ -1644,17 +2031,19 @@ async function boot(): Promise<void> {
         currentMood = resolved;
         audio.setMood(currentMood);
         stepGubbaInPlace(gubba, { type: "mood_changed", mood: currentMood }, clockMs);
-        mirror.sync({ settings, mood: currentMood, watchGubbaRake });
+        syncMirror();
       }
     }
 
     // Hold `0` or Hōki for 0.8 s to trigger smooth-all sweep
     if (hokiHoldStartMs !== null && clockMs - hokiHoldStartMs >= HOKI_HOLD_MS) {
+      // The hold matures here, outside any pointer handler: a thumb still on the broom is a "hold" source
+      const source: HapticSource = hokiTouchHold !== null ? "hold" : "other";
       hokiHoldStartMs = null;
       hokiTouchHold = null;
       if (hoverRake === "hoki") hoverRake = null;
       touchPreviewTag = null;
-      startSweep();
+      startSweep(source);
     }
 
     // Hold a hanging rake on touch for 350 ms to lift it and preview its description without switching
@@ -1663,7 +2052,7 @@ async function boot(): Promise<void> {
       hoverRake = touchRakeHold.id;
       touchPreviewTag = { id: touchRakeHold.id, untilMs: clockMs + TOUCH_PREVIEW_LINGER_MS };
       mirror.say(HOVER_TAGS[touchRakeHold.id]);
-      haptic(12);
+      haptics.trigger("preview", "hold");
     }
     if (touchPreviewTag !== null && touchRakeHold === null && hokiHoldStartMs === null && clockMs >= touchPreviewTag.untilMs) {
       touchPreviewTag = null;
@@ -1675,31 +2064,41 @@ async function boot(): Promise<void> {
       audio.updateFoley(zeroSpeedTelemetry, lastFoleyScreenX);
     }
 
-    // Active Hōki sweep progression
+    // Active Hōki sweep progression (frozen behind the portrait rotate prompt)
     let sweepProgress: number | null = null;
     if (sweepActive) {
-      const elapsed = clockMs - sweepActive.startedAtMs;
-      const changed = applySweep(store.garden.sand, sweepActive.prevElapsedMs, Math.min(elapsed, SWEEP_DURATION_MS));
-      sweepActive.prevElapsedMs = elapsed;
-      if (changed) sandReset = true;
-      if (elapsed >= SWEEP_DURATION_MS) {
-        if (raking && strokeStartedDuringSweep) {
-          if (deferredSweepBefore === null) {
-            deferredSweepBefore = sweepActive.before;
-          }
-        } else {
-          store.commitSnapshot(sweepActive.before);
-          scheduleSave();
-        }
-        sweepActive = null;
-      } else {
-        const t = Math.max(0, Math.min(1, elapsed / SWEEP_DURATION_MS));
+      if (rotateBlocked) {
+        sweepActive.startedAtMs += dtMs;
+        const t = Math.max(0, Math.min(1, sweepActive.prevElapsedMs / SWEEP_DURATION_MS));
         sweepProgress = t * t * (3 - 2 * t);
+      } else {
+        const elapsed = clockMs - sweepActive.startedAtMs;
+        const changed = applySweep(store.garden.sand, sweepActive.prevElapsedMs, Math.min(elapsed, SWEEP_DURATION_MS));
+        sweepActive.prevElapsedMs = elapsed;
+        if (changed) sandReset = true;
+        if (elapsed >= SWEEP_DURATION_MS) {
+          if (raking && strokeStartedDuringSweep) {
+            if (deferredSweepBefore === null) {
+              deferredSweepBefore = sweepActive.before;
+            }
+          } else {
+            store.commitSnapshot(sweepActive.before);
+            scheduleSave();
+          }
+          sweepActive = null;
+        } else {
+          const t = Math.max(0, Math.min(1, elapsed / SWEEP_DURATION_MS));
+          sweepProgress = t * t * (3 - 2 * t);
+        }
       }
     }
 
-    // Animated preset playback ("Watch Gubba rake")
-    stepWatchPlayback(dtMs);
+    // Gubba at work (Gubba mode, "Watch: Gubba rakes"): pause cleanly while the portrait rotate prompt covers the garden
+    if (!rotateBlocked) {
+      runner.tick(dtMs, settings.gubbaVariant, reducedMotion);
+    }
+    const auto = runner.state;
+    if (sweepProgress === null && auto.sweepProgress >= 0) sweepProgress = auto.sweepProgress;
 
     // Breath clock (zero-allocation)
     breathInto(breathBuf, settings.breathPattern, clockMs);
@@ -1707,7 +2106,8 @@ async function boot(): Promise<void> {
 
     // Gubba tick & pose (zero-allocation in-place)
     gubbaTickEvent.pointerOnWall = hoverRake !== null;
-    gubbaTickEvent.raking = raking || watchPlayback !== null;
+    gubbaTickEvent.raking = raking && strokeEngineBegun;
+    gubbaTickEvent.working = auto.working;
     gubbaTickEvent.rakeGridPos = hasRakeHead ? rakeHeadBuf : null;
     gubbaTickEvent.rain = settings.rain;
     gubbaTickEvent.breathPhase = breathBuf.phase;
@@ -1716,6 +2116,7 @@ async function boot(): Promise<void> {
     gubbaHeadYaw = dampYaw(gubbaHeadYaw, gubba.targetYaw, dtMs);
     gubbaPoseOpts.headYaw = gubbaHeadYaw;
     poseGubba(gubba, breathBuf.amplitude, clockMs, gubbaPoseOpts);
+    applyAutoGait(gubbaPoseBuf, auto);
     mirror.mirrorSpeech(gubba.speech);
 
     // Camera damping: frozen while actively raking so pointer->sand mapping never shifts mid-stroke.
@@ -1743,8 +2144,13 @@ async function boot(): Promise<void> {
 
     // Build speech text (active touch rake preview takes priority, then Gubba speech, then mouse hover tag)
     let speechText: string | null =
-      touchPreviewTag !== null ? HOVER_TAGS[touchPreviewTag.id] : (gubba.speech?.text ?? null);
-    if (speechText === null && hoverRake !== null) {
+      placingKind !== null && placingByTouch
+        ? PLACE_HINTS[placingKind]
+        : touchPreviewTag !== null
+          ? HOVER_TAGS[touchPreviewTag.id]
+          : (gubba.speech?.text ?? null);
+    // A rake lifted by a thumb that is still deciding between tap and hold keeps its name tag for the hold
+    if (speechText === null && hoverRake !== null && touchRakeHold === null) {
       speechText = HOVER_TAGS[hoverRake];
     }
     lastSpeechText = speechText;
@@ -1760,13 +2166,16 @@ async function boot(): Promise<void> {
     frame.sandDirty = sandDirty ? dirtyRect : null;
     frame.sandReset = sandReset;
     frame.elements = store.garden.elements;
-    frame.heldRake = watchPlayback
-      ? (PRESETS[watchPlayback.presetId].strokes[watchPlayback.strokeIndex]?.rake ?? settings.rake)
-      : settings.rake;
+    // While Gubba is at work the player's rake hangs on the wall until they reach for the sand, so he never
+    // walks through it. "hoki" here means an empty hand: the broom is an action and never leaves the rack.
+    frame.heldRake =
+      (runner.mode || runner.before !== null) && !playerRakeOut && !(raking && strokeEngineBegun)
+        ? "hoki"
+        : settings.rake;
     frame.hoverRake = hoverRake;
     frame.rakeHead = hasRakeHead ? rakeHeadBuf : null;
     frame.rakeHeading = rakeHeading;
-    frame.raking = raking || watchPlayback !== null;
+    frame.raking = raking && strokeEngineBegun;
     frame.gubbaPose = gubbaPoseBuf;
     frame.breathAmplitude = breathBuf.amplitude;
     frame.breathGuide = settings.breathEnabled;
@@ -1787,6 +2196,18 @@ async function boot(): Promise<void> {
     } else {
       frame.placing = null;
     }
+    autoFrame.rake = auto.rake;
+    autoFrame.tip.x = auto.tipX;
+    autoFrame.tip.y = auto.tipY;
+    autoFrame.tip.z = auto.tipZ;
+    autoFrame.grip.x = auto.gripX;
+    autoFrame.grip.y = auto.gripY;
+    autoFrame.grip.z = auto.gripZ;
+    autoFrame.carried = auto.carried;
+    autoFrame.carriedPos.x = auto.carryX;
+    autoFrame.carriedPos.y = auto.carryY;
+    autoFrame.carriedPos.z = auto.carryZ;
+    autoFrame.carriedYaw = auto.carryYaw;
 
     overlayState.settings = settings;
     overlayState.breathAmplitude = breathBuf.amplitude;
@@ -1794,6 +2215,7 @@ async function boot(): Promise<void> {
     overlayState.panel = panel;
     overlayState.tab = tab;
     overlayState.watchGubbaRake = watchGubbaRake;
+    overlayState.gubbaMode = runner.mode;
     overlayState.elementCount = store.garden.elements.length;
     overlayState.maxElements = MAX_ELEMENTS;
     overlayState.pointer = hasPointerFb ? pointerFbBuf : null;
@@ -1807,6 +2229,8 @@ async function boot(): Promise<void> {
 
   updateViewportSize();
   window.addEventListener("resize", updateViewportSize);
+  // iOS browsers resize the visual viewport when the address bar hides or shows, often without a window resize
+  window.visualViewport?.addEventListener("resize", updateViewportSize);
 
   // Render initial frame immediately
   stepFrame(0);
@@ -1834,11 +2258,44 @@ async function boot(): Promise<void> {
         panel,
         tab,
         speech: lastSpeechText,
+        hoverRake,
         watchGubbaRake,
+        gubbaMode: runner.mode,
+        undoCount: store.history.undoCount,
+        redoCount: store.history.redoCount,
         rotateBlocked,
       }),
+      auto: () => {
+        const a = runner.state;
+        return {
+          mode: runner.mode,
+          watch: watchGubbaRake,
+          phase: autoPhase(a),
+          target: runner.target,
+          rootPos: { x: a.x, y: a.y, z: a.z },
+          yaw: a.yaw,
+          seated: a.seated,
+          working: a.working,
+          heldRake: a.rake,
+          raking: a.rakeLive,
+          carriedKind: a.carried,
+          sandPlan: runner.sandPlan,
+          lastSealDiffCells: runner.lastSealDiffCells,
+          cyclesCompleted: runner.cyclesCompleted,
+        };
+      },
+      setGubbaMode: (on) => {
+        setGubbaMode(on);
+        stepFrame(0);
+      },
+      autoRequest: (id) => {
+        const started = requestGubbaPreset(id);
+        stepFrame(0);
+        return started;
+      },
       stroke: (points, rakeId) => {
         if (points.length === 0) return sandHash(store.garden.sand);
+        yieldToPlayer();
         const tool = RAKE_BY_ID[rakeId ?? settings.rake];
         const first = points[0]!;
         const second = points[1];
@@ -1917,6 +2374,7 @@ async function boot(): Promise<void> {
       },
       setWatchGubbaRake: (on) => {
         watchGubbaRake = on;
+        syncMirror();
         stepFrame(0);
       },
       openPanel: (p, t) => {
@@ -1934,6 +2392,7 @@ async function boot(): Promise<void> {
         return act;
       },
       placeElement: (kind, x, y) => {
+        yieldToPlayer();
         const fp = ELEMENT_FOOTPRINTS[kind];
         const ok = store.placeElement({
           id: uniqueElementId(kind),
@@ -1952,6 +2411,7 @@ async function boot(): Promise<void> {
         return ok;
       },
       moveElement: (id, x, y) => {
+        yieldToPlayer();
         const ok = store.moveElement(id, Math.round(x), Math.round(y));
         if (ok) {
           sandReset = true;
@@ -1961,6 +2421,7 @@ async function boot(): Promise<void> {
         return ok;
       },
       removeElement: (id) => {
+        yieldToPlayer();
         const ok = store.removeElement(id);
         if (ok) {
           sandReset = true;
@@ -1970,18 +2431,16 @@ async function boot(): Promise<void> {
         return ok;
       },
       undo: () => {
-        const ok = store.undo();
+        const ok = undoGarden();
         if (ok) {
-          sandReset = true;
           flushSave();
           stepFrame(0);
         }
         return ok;
       },
       redo: () => {
-        const ok = store.redo();
+        const ok = redoGarden();
         if (ok) {
-          sandReset = true;
           flushSave();
           stepFrame(0);
         }
@@ -2022,6 +2481,7 @@ async function boot(): Promise<void> {
       frameHash: () => renderer.frameHash(),
       paletteViolations: () => renderer.paletteViolations(),
       particleCount: () => renderer.garden.particles.count,
+      haptics: () => ({ count: haptics.count, last: haptics.last }),
       exportPng: async (scale = 4, includeOverlay = true) => {
         const blob = await renderer.exportPng(scale, includeOverlay);
         const bmp = await createImageBitmap(blob);

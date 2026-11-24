@@ -176,6 +176,28 @@ export const VARIANT_LINES: Readonly<Record<GubbaVariant, readonly string[]>> = 
   ],
 };
 
+/** Gubba mode and "Watch: Gubba rakes": getting up to rake, sitting back down, and giving way to the player. */
+export const AUTO_START_LINES: readonly string[] = [
+  "The cushion can manage without me. It has said so.",
+  "I have decided to supervise from closer up.",
+  "Short arms, long rake. It evens out.",
+  "The sand has been patient. I will go and see what it wanted.",
+];
+
+export const AUTO_DONE_LINES: readonly string[] = [
+  "There. The sand and I have come to an arrangement.",
+  "The rake is back on its pegs. The tea was waiting.",
+  "That is one way the sand can lie. There are others.",
+  "I put the stones where the stones said.",
+];
+
+export const AUTO_YIELD_LINES: readonly string[] = [
+  "The sand is yours. I was only keeping it company.",
+  "Ah. A hand. I will go and sit.",
+  "Two rakes is one too many. Mine can rest.",
+  "I had not finished. Nothing here ever is.",
+];
+
 /** Reflections: the general pool for taps, quiet pauses, and Companion mode. */
 export const IDLE_LINES: readonly string[] = [
   "Mm.",
@@ -254,11 +276,14 @@ function buildLines(): LineDef[] {
   for (const v of Object.keys(VARIANT_LINES) as GubbaVariant[]) {
     for (const text of VARIANT_LINES[v]) out.push({ tag: `variant:${v}`, text });
   }
+  for (const text of AUTO_START_LINES) out.push({ tag: "auto_start", text });
+  for (const text of AUTO_DONE_LINES) out.push({ tag: "auto_done", text });
+  for (const text of AUTO_YIELD_LINES) out.push({ tag: "auto_yield", text });
   for (const text of IDLE_LINES) out.push({ tag: "idle", text });
   return out;
 }
 
-/** Every line with its trigger tag. About 120 lines. */
+/** Every line with its trigger tag. About 130 lines. */
 export const LINES: readonly LineDef[] = buildLines();
 
 const POOLS: ReadonlyMap<string, readonly string[]> = (() => {

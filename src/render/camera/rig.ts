@@ -324,7 +324,7 @@ export const PRESET_FRAMING: Readonly<Record<CameraPresetId, FramingSpec>> = {
 
 /**
  * Width and height of the corner the HUD block occupies, with one pixel of air (bottom-left of the frame), when
- * the overlay is drawn `uiScale` scene pixels per overlay pixel (`uiScaleFor` in overlay.ts).
+ * the overlay is drawn `uiScale` scene pixels per overlay pixel (`Overlay.scale`, from `uiPixelFor` in overlay.ts).
  */
 export function hudClearWidth(uiScale = 1): number {
   return (HUD_LEFT + 3 * HUD_ICON) * uiScale + 1;

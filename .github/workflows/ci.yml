@@ -120,12 +120,22 @@ jobs:
           PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/touch
         run: npm run test:e2e:touch
 
-      - name: Upload viewport screenshots
+      # Autonomous Gubba mode & 3D Watch: Gubba rakes choreography across all three variants.
+      - name: Run autonomous Gubba mode checks
+        if: success() || failure()
+        env:
+          BASE_PATH: /gubbas-porch/
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/auto
+        run: npm run test:e2e:auto
+
+      - name: Upload viewport & Gubba mode screenshots
         if: success() || failure()
         uses: actions/upload-artifact@v4
         with:
-          name: viewport-screenshots
-          path: test-results/viewport-*.png
+          name: e2e-screenshots
+          path: |
+            test-results/viewport-*.png
+            test-results/auto-*.png
           if-no-files-found: warn
           retention-days: 7
 
