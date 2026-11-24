@@ -1100,6 +1100,146 @@ test.describe("an installed phone app: back from the background with the screen 
     expect(errors).toEqual([]);
   });
 
+  test("installed on iOS, the whole layout stale after a resume: the canvas stays on the screen and a tapped HUD object is the one pressed", async ({
+    page,
+  }) => {
+    const errors = watchErrors(page);
+    // An installed iOS web app: `navigator.standalone`, a screen that always reports its upright size, and an
+    // orientation angle the test turns by hand while the window keeps whatever size it is given
+    await page.addInitScript(() => {
+      const w = window as unknown as { __angle: number };
+      w.__angle = 90;
+      Object.defineProperty(Navigator.prototype, "standalone", { configurable: true, get: () => true });
+      Object.defineProperty(Screen.prototype, "width", { configurable: true, get: () => 390 });
+      Object.defineProperty(Screen.prototype, "height", { configurable: true, get: () => 844 });
+      Object.defineProperty(ScreenOrientation.prototype, "angle", { configurable: true, get: () => w.__angle });
+    });
+    const turn = (angle: number): Promise<void> =>
+      page.evaluate((a) => {
+        (window as unknown as { __angle: number }).__angle = a;
+        window.dispatchEvent(new Event("orientationchange"));
+      }, angle);
+    await page.goto("?test=1");
+    await page.waitForFunction(() => Boolean(window.__rakeMe));
+    await page.touchscreen.tap(422, 195);
+    await expect(page.locator("#title-card")).toBeHidden();
+    const prompt = page.locator("#rotate-prompt");
+    const home = await page.evaluate(() => {
+      const api = window.__rakeMe!;
+      api.setMood("afternoon");
+      api.setCamera("cozy");
+      api.advance(16);
+      return { fb: api.fbSize(), camera: api.state().camera };
+    });
+    expect(home.fb).toMatchObject({ fbW: 422, fbH: 195, scale: 6 });
+
+    // 1. Away on its side, back upright, but the layout is still as wide as the screen was: the screen says upright.
+    await setPageHidden(page, true);
+    await page.setViewportSize({ width: 844, height: 844 });
+    await turn(0);
+    await setPageHidden(page, false);
+    await expect(prompt, "upright with a stale square layout").toBeVisible();
+    const card = await page.evaluate(() => {
+      const r = document.querySelector("#rotate-prompt .card-box, #rotate-prompt > *")!.getBoundingClientRect();
+      return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+    });
+    expect(card.left, "the prompt's card is on the upright screen").toBeGreaterThanOrEqual(0);
+    expect(card.right).toBeLessThanOrEqual(390);
+    expect(card.top).toBeGreaterThanOrEqual(0);
+    expect(card.bottom).toBeLessThanOrEqual(844);
+
+    // 2. On its side again. The window, the visual viewport, 100dvh and the stage all keep the upright height, as
+    //    the iPhone does until the app is relaunched; only the screen knows better.
+    await turn(90);
+    await expect(prompt).toBeHidden();
+    const stale = await page.evaluate(() => {
+      const api = window.__rakeMe!;
+      api.advance(16);
+      const stage = document.getElementById("stage")!;
+      const c = document.getElementById("garden-canvas")!.getBoundingClientRect();
+      const vv = window.visualViewport!;
+      return {
+        layout: [window.innerWidth, window.innerHeight, vv.height, stage.clientHeight],
+        canvas: { right: c.right, bottom: c.bottom },
+        fb: api.fbSize(),
+        state: api.state(),
+        hud: api.overlayHits().filter((h) => h.action.type === "hud"),
+        violations: api.paletteViolations(),
+      };
+    });
+    expect(stale.layout, "everything the page can measure is stale").toEqual([844, 844, 844, 844]);
+    expect(stale.canvas.bottom, "the canvas ends on the screen").toBeLessThanOrEqual(390 + 1 / 64);
+    expect(stale.canvas.right).toBeLessThanOrEqual(844 + 1 / 64);
+    expect(stale.fb, "the same framebuffer as before the app went away").toEqual(home.fb);
+    expect(stale.state.rotateBlocked).toBe(false);
+    expect(stale.state.camera).toEqual(home.camera);
+    expect(stale.violations).toBe(0);
+    expect(stale.hud).toHaveLength(6);
+    // (`expectIntegerScale` measures against the window, which is the stale thing here)
+    expect(await page.evaluate(() => {
+      const c = document.getElementById("garden-canvas") as HTMLCanvasElement;
+      const { fbW, fbH, scale } = window.__rakeMe!.fbSize();
+      return [c.width === fbW * scale, c.height === fbH * scale];
+    }), "a whole number of device pixels per scene pixel").toEqual([true, true]);
+
+    // A thumb on each HUD object presses that object, not a neighbour
+    const centres = await page.evaluate(() => {
+      const api = window.__rakeMe!;
+      const { fbW, fbH } = api.fbSize();
+      const r = document.getElementById("garden-canvas")!.getBoundingClientRect();
+      return api.overlayHits()
+        .filter((h) => h.action.type === "hud")
+        .map((h) => ({
+          id: (h.action as { id: string }).id,
+          x: r.left + ((h.x + h.w / 2) / fbW) * r.width,
+          y: r.top + ((h.y + h.h / 2) / fbH) * r.height,
+        }));
+    });
+    const menu = centres.find((c) => c.id === "menu")!;
+    expect(menu.y, "the menu object is on the screen").toBeLessThan(390);
+    await page.touchscreen.tap(menu.x, menu.y);
+    await expect.poll(() => page.evaluate(() => window.__rakeMe!.state().panel)).toBe("settings");
+
+    // 3. The stage settles before the window does: the layout is the screen's again, but the window and the
+    //    visual viewport still report the upright height. Still the same framebuffer, not the stale window's.
+    await page.evaluate(() => {
+      const w = window as unknown as { __vvHeight: PropertyDescriptor | undefined; __innerHeight: PropertyDescriptor | undefined };
+      w.__vvHeight = Object.getOwnPropertyDescriptor(VisualViewport.prototype, "height");
+      w.__innerHeight = Object.getOwnPropertyDescriptor(window, "innerHeight");
+      Object.defineProperty(window, "innerHeight", { configurable: true, get: () => 844 });
+      Object.defineProperty(VisualViewport.prototype, "height", { configurable: true, get: () => 844 });
+    });
+    await page.setViewportSize({ width: 844, height: 390 });
+    await expect.poll(() => page.evaluate(() => document.getElementById("stage")!.clientHeight)).toBe(390);
+    const stageFirst = await page.evaluate(() => {
+      window.dispatchEvent(new Event("resize"));
+      const api = window.__rakeMe!;
+      api.advance(16);
+      const c = document.getElementById("garden-canvas")!.getBoundingClientRect();
+      return { fb: api.fbSize(), bottom: c.bottom, win: [window.innerHeight, window.visualViewport!.height] };
+    });
+    expect(stageFirst.win, "the window still reports the upright height").toEqual([844, 844]);
+    expect(stageFirst.fb).toEqual(home.fb);
+    expect(stageFirst.bottom).toBeLessThanOrEqual(390 + 1 / 64);
+    await page.evaluate(() => {
+      const w = window as unknown as { __vvHeight: PropertyDescriptor; __innerHeight: PropertyDescriptor };
+      Object.defineProperty(window, "innerHeight", w.__innerHeight);
+      Object.defineProperty(VisualViewport.prototype, "height", w.__vvHeight);
+    });
+
+    // 4. The layout catches up at last: nothing moves.
+    await page.setViewportSize({ width: 844, height: 390 });
+    await expect.poll(() => page.evaluate(() => document.getElementById("stage")!.clientHeight)).toBe(390);
+    const settled = await page.evaluate(() => {
+      const api = window.__rakeMe!;
+      api.advance(16);
+      return { fb: api.fbSize(), camera: api.state().camera, blocked: api.state().rotateBlocked };
+    });
+    expect(settled).toEqual({ fb: home.fb, camera: home.camera, blocked: false });
+    expect(await canvasOverflow(page)).toBe(0);
+    expect(errors).toEqual([]);
+  });
+
   test("every way back to the foreground looks again after the layout settles, without ResizeObserver or a resize event", async ({
     page,
   }) => {
@@ -1264,6 +1404,74 @@ test.describe("the running garden, outside test mode", () => {
     });
     await expect.poll(async () => (await sized()).w).toBeLessThanOrEqual(750);
     expect(await canvasOverflow(page), "inset").toBe(0);
+    expect(errors).toEqual([]);
+  });
+
+  test("installed on iOS with every event swallowed: the prompt fits the screen while loading, and the frame loop alone follows a late home-bar inset under a stale layout", async ({
+    page,
+  }) => {
+    const errors = watchErrors(page);
+    await page.addInitScript(() => {
+      const w = window as unknown as { __angle: number };
+      w.__angle = 0;
+      Object.defineProperty(Navigator.prototype, "standalone", { configurable: true, get: () => true });
+      Object.defineProperty(Screen.prototype, "width", { configurable: true, get: () => 390 });
+      Object.defineProperty(Screen.prototype, "height", { configurable: true, get: () => 844 });
+      Object.defineProperty(ScreenOrientation.prototype, "angle", { configurable: true, get: () => w.__angle });
+      delete (window as { ResizeObserver?: unknown }).ResizeObserver;
+      const swallow = (ev: Event): void => ev.stopImmediatePropagation();
+      for (const type of ["resize", "orientationchange", "pageshow", "focus"]) window.addEventListener(type, swallow, true);
+      window.visualViewport?.addEventListener("resize", swallow, true);
+      window.visualViewport?.addEventListener("scroll", swallow, true);
+    });
+    // Upright, but the layout is as wide as the screen held sideways; one model is held back so the garden is
+    // still loading while the card is measured
+    await page.setViewportSize({ width: 844, height: 844 });
+    let releaseGlb!: () => void;
+    const glbGate = new Promise<void>((resolve) => {
+      releaseGlb = resolve;
+    });
+    let held = false;
+    await page.route("**/assets/models/gubba_moss.glb", async (route) => {
+      if (!held) {
+        held = true;
+        await glbGate;
+      }
+      await route.continue();
+    });
+    const nav = page.goto("./");
+    const prompt = page.locator("#rotate-prompt");
+    await expect(prompt).toBeVisible();
+    await expect.poll(() => held, { message: "a model is still loading" }).toBe(true);
+    const card = await page.evaluate(() => {
+      const r = document.querySelector("#rotate-prompt .card-box")!.getBoundingClientRect();
+      return [r.left, r.right];
+    });
+    expect(card[0], "the card is on the upright screen even while the garden loads").toBeGreaterThanOrEqual(0);
+    expect(card[1]).toBeLessThanOrEqual(390);
+    releaseGlb();
+    await nav;
+
+    // Turned on its side; the layout stays 844 tall and nothing announces the turn
+    await page.evaluate(() => {
+      (window as unknown as { __angle: number }).__angle = 90;
+    });
+    await expect(prompt).toBeHidden({ timeout: 20_000 });
+    const canvasBox = (): Promise<{ w: number; bottom: number }> =>
+      page.evaluate(() => {
+        const r = document.getElementById("garden-canvas")!.getBoundingClientRect();
+        return { w: r.width, bottom: r.bottom };
+      });
+    await expect.poll(async () => (await canvasBox()).w, { timeout: 20_000 }).toBeGreaterThan(800);
+    await page.locator("#title-card").click();
+    await expect(page.locator("#title-card")).toBeHidden();
+    await expect.poll(async () => (await canvasBox()).bottom).toBeLessThanOrEqual(390 + 1 / 64);
+
+    // The home-bar inset arrives late, with no event: the frame loop alone moves the canvas above it
+    await page.evaluate(() => {
+      document.getElementById("stage")!.style.bottom = "21px";
+    });
+    await expect.poll(async () => (await canvasBox()).bottom).toBeLessThanOrEqual(390 - 21 + 1 / 64);
     expect(errors).toEqual([]);
   });
 });

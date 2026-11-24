@@ -20,7 +20,13 @@ import type { HapticKind, HapticsEnv } from "../../src/ui/haptics.ts";
 import {
   createTouchBrush, discOffsets, pullTouchBrush, resetTouchBrush, TOUCH_BRUSH_RADIUS_PX, TOUCH_SLOP_PX,
 } from "../../src/ui/touch.ts";
-import { boundedViewportSide } from "../../src/ui/viewport.ts";
+import {
+  boundedViewportSide,
+  isSidewaysAngle,
+  onScreenSide,
+  screenHeightFor,
+  screenWidthFor,
+} from "../../src/ui/viewport.ts";
 
 const EMPTY_CONTEXT: StrokeStartContext = { stones: [], flow: false };
 const STONE: ElementInstance = {
@@ -703,6 +709,48 @@ describe("canvas box", () => {
       const known = visual > 0 ? [...base, visual] : base;
       return out === Math.min(...known);
     }));
+  });
+
+  it("holds the stage to the screen when the whole layout is stale", () => {
+    // iPhone 16 installed app, turned on its side after being shown upright: window, visual viewport and stage keep
+    // the upright height (831 = 852 less the 21 px home bar inset), the screen is 393 tall
+    expect(onScreenSide(831, 0, 21, 393)).toBe(372);
+    expect(onScreenSide(734, 59, 59, 852)).toBe(734);
+    // the stage has settled while the window is still stale: it is already right and stays so
+    expect(onScreenSide(372, 0, 21, 393)).toBe(372);
+    // a stage that starts below the screen's top edge ends at the screen's bottom, less the inset
+    expect(onScreenSide(390, 24, 0, 390)).toBe(366);
+    expect(onScreenSide(390, 24, 21, 390)).toBe(345);
+    // a stage that fits is left alone
+    expect(onScreenSide(300, 0, 21, 393)).toBe(300);
+  });
+
+  it("leaves an unknown stage or screen alone and never reports a known stage as unknown", () => {
+    expect(onScreenSide(831, 0, 21, 0)).toBe(831);
+    expect(onScreenSide(831, 0, 21, Number.NaN)).toBe(831);
+    expect(onScreenSide(0, 0, 21, 393)).toBe(0);
+    expect(onScreenSide(831, Number.NaN, Number.NaN, 393)).toBe(393);
+    // wholly off the screen: 1, not the 0 that `boundedViewportSide` would skip in favour of the stale window
+    expect(onScreenSide(400, 500, 0, 393)).toBe(1);
+  });
+
+  it("never grows the stage and never reaches past the screen's edge less the inset", () => {
+    const side = fc.double({ min: 1, max: 4000, noNaN: true });
+    const inset = fc.double({ min: 0, max: 80, noNaN: true });
+    fc.assert(fc.property(side, inset, inset, side, (stage, start, end, screen) => {
+      const out = onScreenSide(stage, start, end, screen);
+      return out >= 1 && out <= stage && (out === 1 || start + out + end <= screen + 1e-9);
+    }));
+  });
+
+  it("reads the screen as it is held", () => {
+    expect([0, 180, -180].map(isSidewaysAngle)).toEqual([false, false, false]);
+    expect([90, -90, 270].map(isSidewaysAngle)).toEqual([true, true, true]);
+    // iOS reports the screen upright whichever way it is held
+    expect([screenWidthFor(393, 852, true), screenHeightFor(393, 852, true)]).toEqual([852, 393]);
+    expect([screenWidthFor(393, 852, false), screenHeightFor(393, 852, false)]).toEqual([393, 852]);
+    // a browser that swaps the screen's sides with the orientation gives the same answer
+    expect([screenWidthFor(852, 393, true), screenHeightFor(852, 393, false)]).toEqual([852, 852]);
   });
 });
 

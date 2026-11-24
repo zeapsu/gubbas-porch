@@ -77,6 +77,7 @@ import {
   adjustMix,
   bindKeyboard,
   boundedViewportSide,
+  isSidewaysAngle,
   createAutoRunner,
   createDomMirror,
   createHaptics,
@@ -85,6 +86,9 @@ import {
   effectiveMood,
   hapticSource,
   needsLandscape,
+  onScreenSide,
+  screenHeightFor,
+  screenWidthFor,
   nextBreathPattern,
   nextCameraPreset,
   nextGubbaVariant,
@@ -221,6 +225,64 @@ const STATIONARY_FOLEY_TIMEOUT_MS = 80;
 const RESUME_SETTLE_SOON_MS = 150;
 const RESUME_SETTLE_LATE_MS = 400;
 
+/**
+ * An installed web app on iOS fills the whole screen, so there the screen bounds every layout measure, which iOS
+ * can leave at the other orientation's size after a resume (`onScreenSide`). Elsewhere a window is no larger than
+ * the screen anyway, and a desktop browser's page zoom would put the two in different units.
+ */
+const IOS_STANDALONE = (navigator as Navigator & { standalone?: boolean }).standalone === true;
+
+/** 1 when the screen is on its side, 0 when upright, -1 when this browser cannot tell. Allocation-free. */
+function screenSideways(): number {
+  const o = window.screen.orientation as ScreenOrientation | undefined;
+  const angle: unknown = o && typeof o.angle === "number" ? o.angle : (window as { orientation?: unknown }).orientation;
+  return typeof angle === "number" ? (isSidewaysAngle(angle) ? 1 : 0) : -1;
+}
+
+/** Width of the screen as it is held, in CSS pixels, in an installed iOS web app; 0 elsewhere or when unknown. */
+function appScreenW(): number {
+  if (!IOS_STANDALONE) return 0;
+  const sideways = screenSideways();
+  return sideways < 0 ? 0 : screenWidthFor(window.screen.width, window.screen.height, sideways === 1);
+}
+
+/** Height of the screen as it is held, in CSS pixels, in an installed iOS web app; 0 elsewhere or when unknown. */
+function appScreenH(): number {
+  if (!IOS_STANDALONE) return 0;
+  const sideways = screenSideways();
+  return sideways < 0 ? 0 : screenHeightFor(window.screen.width, window.screen.height, sideways === 1);
+}
+
+// The turn-sideways prompt and the title card are centred in boxes as large as the layout, which in an installed
+// iOS web app can be larger than the screen; there they are held to the screen's size so they stay in its middle.
+let fittedBoxW = -1;
+let fittedBoxH = -1;
+function fitOverlaysToScreen(boxes: readonly (HTMLElement | null)[]): void {
+  const root = document.documentElement;
+  const sw = appScreenW();
+  const sh = appScreenH();
+  const w = sw > 0 && Math.max(window.innerWidth, root.clientWidth) > sw ? sw : 0;
+  const h = sh > 0 && Math.max(window.innerHeight, root.clientHeight) > sh ? sh : 0;
+  if (w === fittedBoxW && h === fittedBoxH) return;
+  fittedBoxW = w;
+  fittedBoxH = h;
+  for (const el of boxes) {
+    if (!el) continue;
+    el.style.width = w > 0 ? `${w}px` : "";
+    el.style.height = h > 0 ? `${h}px` : "";
+  }
+}
+
+/** True when the window, never larger than the screen it is on, is an upright phone's. Allocation-free. */
+function windowNeedsLandscape(): boolean {
+  const sw = appScreenW();
+  const sh = appScreenH();
+  return needsLandscape(
+    sw > 0 ? Math.min(window.innerWidth, sw) : window.innerWidth,
+    sh > 0 ? Math.min(window.innerHeight, sh) : window.innerHeight,
+  );
+}
+
 function readStorage(key: string): string | null {
   try {
     return window.localStorage.getItem(key);
@@ -328,11 +390,14 @@ async function boot(): Promise<void> {
       }
     }
   }
-  if (rotatePrompt && needsLandscape(window.innerWidth, window.innerHeight)) {
+  const screenBoxes = [rotatePrompt, titleCard] as const;
+  fitOverlaysToScreen(screenBoxes);
+  if (rotatePrompt && windowNeedsLandscape()) {
     applyRotateDom(true);
   }
   const onBootResize = (): void => {
-    const blocked = rotatePrompt !== null && needsLandscape(window.innerWidth, window.innerHeight);
+    fitOverlaysToScreen(screenBoxes);
+    const blocked = rotatePrompt !== null && windowNeedsLandscape();
     if (blocked !== rotateBlocked) applyRotateDom(blocked);
   };
   window.addEventListener("resize", onBootResize);
@@ -476,6 +541,12 @@ async function boot(): Promise<void> {
   let strokeEngineBegun = false;
   let strokeSawSweep = false;
   const activeTouches = new Map<number, { x: number; y: number }>();
+  /**
+   * A finger on a HUD object. The object acts when the finger lifts, and on the object under the lift point: a
+   * thumb's first contact is its tip, often a little off the object it then settles on, and a finger that slides
+   * off every object before lifting presses nothing.
+   */
+  let hudTouch: { pointerId: number; action: OverlayAction; x: number; y: number } | null = null;
   let touchRakeHold: {
     id: RakeId;
     pointerId: number;
@@ -744,11 +815,12 @@ async function boot(): Promise<void> {
     touchPlacingPointerId = null;
     movingElement = null;
     placingKind = null;
+    hudTouch = null;
   }
 
   /** Shows the turn-sideways prompt on an upright phone and hands the garden back once it is turned. */
   function updateRotatePrompt(): void {
-    const blocked = rotatePrompt !== null && needsLandscape(window.innerWidth, window.innerHeight);
+    const blocked = rotatePrompt !== null && windowNeedsLandscape();
     if (blocked === rotateBlocked) return;
     // nothing fires or leaks foley under the prompt
     if (blocked) clearActiveInteractions();
@@ -764,11 +836,40 @@ async function boot(): Promise<void> {
 
   // The canvas fills the stage, but never more than the window and the visual viewport show: a stage still at
   // an upright phone's height after the screen has turned must not size a canvas taller than the screen
-  // (`boundedViewportSide`). Both are read every frame by `viewportDrifted`, so they allocate nothing.
+  // (`boundedViewportSide`). In an installed iOS web app the window and the visual viewport can be just as stale,
+  // so there the part of the stage past the screen's edge is cut off first (`onScreenSide`). All of it is read
+  // every frame by `viewportDrifted`, so it allocates nothing.
+  // The stage's trailing safe-area insets (its resolved `right` and `bottom`), read with the layout rather than
+  // every frame, since reading a computed style allocates. Only an installed iOS web app needs them.
+  let stageEndInsetW = 0;
+  let stageEndInsetH = 0;
+  // The stage's own box when the insets were last read: a change means they may have changed too, even when the
+  // canvas it bounds comes out the same size (a home-bar inset arriving late under a stale layout)
+  let rawStageW = -1;
+  let rawStageH = -1;
+  let rawStageX = -1;
+  let rawStageY = -1;
+  function readStageInsets(): void {
+    if (!IOS_STANDALONE || !stage) return;
+    const cs = getComputedStyle(stage);
+    stageEndInsetW = parseFloat(cs.right) || 0;
+    stageEndInsetH = parseFloat(cs.bottom) || 0;
+  }
+
+  function stageOnScreenW(): number {
+    if (!stage) return 0;
+    return onScreenSide(stage.clientWidth, stage.offsetLeft, stageEndInsetW, appScreenW());
+  }
+
+  function stageOnScreenH(): number {
+    if (!stage) return 0;
+    return onScreenSide(stage.clientHeight, stage.offsetTop, stageEndInsetH, appScreenH());
+  }
+
   function liveDeviceW(dpr: number): number {
     const vv = window.visualViewport;
     const cssW = boundedViewportSide(
-      stage ? stage.clientWidth : 0,
+      stageOnScreenW(),
       window.innerWidth,
       vv && vv.scale <= VISUAL_VIEWPORT_MAX_SCALE ? vv.width : 0,
     );
@@ -778,7 +879,7 @@ async function boot(): Promise<void> {
   function liveDeviceH(dpr: number): number {
     const vv = window.visualViewport;
     const cssH = boundedViewportSide(
-      stage ? stage.clientHeight : 0,
+      stageOnScreenH(),
       window.innerHeight,
       vv && vv.scale <= VISUAL_VIEWPORT_MAX_SCALE ? vv.height : 0,
     );
@@ -786,6 +887,14 @@ async function boot(): Promise<void> {
   }
 
   function updateViewportSize(): void {
+    readStageInsets();
+    fitOverlaysToScreen(screenBoxes);
+    if (stage) {
+      rawStageW = stage.clientWidth;
+      rawStageH = stage.clientHeight;
+      rawStageX = stage.offsetLeft;
+      rawStageY = stage.offsetTop;
+    }
     const dpr = window.devicePixelRatio || 1;
     const deviceW = liveDeviceW(dpr);
     const deviceH = liveDeviceH(dpr);
@@ -815,9 +924,14 @@ async function boot(): Promise<void> {
     const dpr = window.devicePixelRatio || 1;
     return (
       dpr !== sizedDpr ||
+      (stage !== null &&
+        (stage.clientWidth !== rawStageW ||
+          stage.clientHeight !== rawStageH ||
+          stage.offsetLeft !== rawStageX ||
+          stage.offsetTop !== rawStageY)) ||
       liveDeviceW(dpr) !== sizedW ||
       liveDeviceH(dpr) !== sizedH ||
-      (rotatePrompt !== null && needsLandscape(window.innerWidth, window.innerHeight)) !== rotateBlocked
+      (rotatePrompt !== null && windowNeedsLandscape()) !== rotateBlocked
     );
   }
 
@@ -1397,18 +1511,31 @@ async function boot(): Promise<void> {
     return Math.min(TOUCH_SEARCH_MAX_FB, (cssPx * renderer.fbW) / Math.max(1, r.width));
   }
 
-  /** The HUD or menu control nearest a touch that landed just outside every control, or null. */
+  /**
+   * The HUD or menu control nearest a touch that landed just outside every control, or null. Every control is
+   * measured from the touch itself, so neither direction is favoured (a search that tried up and left first would
+   * always press the upper of two HUD rows), and a control is only taken when the point of it nearest the touch is
+   * not covered by something drawn above it.
+   */
   function touchOverlayHit(fbX: number, fbY: number, hudOnly = false): OverlayAction | null {
     const radius = touchRadiusFb(TOUCH_OVERLAY_SLOP_PX);
-    const r2 = radius * radius;
-    for (let i = 2; i < TOUCH_SEARCH_OFFSETS.length; i += 2) {
-      const dx = TOUCH_SEARCH_OFFSETS[i]!;
-      const dy = TOUCH_SEARCH_OFFSETS[i + 1]!;
-      if (dx * dx + dy * dy > r2) break;
-      const action = renderer.overlayHit(fbX + dx, fbY + dy);
-      if (action !== null && action.type !== "none" && (!hudOnly || action.type === "hud")) return action;
+    const hits = renderer.overlayHits();
+    let best: OverlayAction | null = null;
+    let bestD2 = radius * radius;
+    for (let i = hits.length - 1; i >= 0; i--) {
+      const h = hits[i]!;
+      const action = h.action;
+      if (action === best || action.type === "none" || (hudOnly && action.type !== "hud")) continue;
+      const px = Math.min(Math.max(fbX, h.x), h.x + h.w);
+      const py = Math.min(Math.max(fbY, h.y), h.y + h.h);
+      const d2 = (px - fbX) * (px - fbX) + (py - fbY) * (py - fbY);
+      if (d2 > bestD2 || (best !== null && d2 === bestD2)) continue;
+      // the occlusion probe goes a hair inside the far edges, which belong to the next control
+      if (renderer.overlayHit(Math.min(px, h.x + h.w - 1e-3), Math.min(py, h.y + h.h - 1e-3)) !== action) continue;
+      best = action;
+      bestD2 = d2;
     }
-    return null;
+    return best;
   }
 
   /**
@@ -1444,6 +1571,7 @@ async function boot(): Promise<void> {
     hokiTouchHold = null;
     movingElement = null;
     touchPlacingPointerId = null;
+    hudTouch = null;
   }
 
   canvas.addEventListener("contextmenu", (ev) => {
@@ -1472,6 +1600,7 @@ async function boot(): Promise<void> {
       if (activeTouches.size > 2) return;
       if (activeTouches.size === 2) {
         if (raking) endStrokeForSecondFinger(ev.timeStamp);
+        hudTouch = null;
         if (touchRakeHold && hoverRake === touchRakeHold.id) hoverRake = null;
         if (hokiTouchHold && hoverRake === "hoki") hoverRake = null;
         touchRakeHold = null;
@@ -1514,6 +1643,10 @@ async function boot(): Promise<void> {
     }
     if (ovAction !== null) {
       touchPreviewTag = null;
+      if (touch && ovAction.type === "hud") {
+        hudTouch = { pointerId: ev.pointerId, action: ovAction, x: ev.clientX, y: ev.clientY };
+        return;
+      }
       handleOverlayAction(ovAction, source);
       return;
     }
@@ -1942,6 +2075,16 @@ async function boot(): Promise<void> {
       if (ev.pointerType === "touch" && hoverRake === "hoki") hoverRake = null;
     }
 
+    if (hudTouch && ev.pointerId === hudTouch.pointerId) {
+      const pressed = hudTouch;
+      hudTouch = null;
+      const fb = renderer.clientToFramebuffer(ev.clientX, ev.clientY);
+      const lifted = renderer.overlayHit(fb.x, fb.y) ?? touchOverlayHit(fb.x, fb.y, true);
+      if (lifted !== null && lifted.type === "hud") handleOverlayAction(lifted, "touch");
+      else if (Math.hypot(ev.clientX - pressed.x, ev.clientY - pressed.y) <= TOUCH_SLOP_PX) handleOverlayAction(pressed.action, "touch");
+      return;
+    }
+
     if (touchRakeHold && ev.pointerId === touchRakeHold.pointerId) {
       const hold = touchRakeHold;
       touchRakeHold = null;
@@ -2034,6 +2177,7 @@ async function boot(): Promise<void> {
   }
   function onPointerCancel(ev: PointerEvent): void {
     releasePointer(ev.pointerId);
+    if (hudTouch && ev.pointerId === hudTouch.pointerId) hudTouch = null;
     activeTouches.delete(ev.pointerId);
     if (activeTouches.size < 2) {
       pinchDist = null;

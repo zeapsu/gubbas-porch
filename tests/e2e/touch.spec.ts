@@ -781,6 +781,99 @@ test.describe("Gubba's Porch — mobile & touch controls", () => {
     expect(errors).toEqual([]);
   });
 
+  test("HUD taps: a touch between two rows presses the nearer one, and the object under the lifting thumb is the one pressed", async ({
+    page,
+  }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    const cdp = await enterGarden(page);
+    const h0 = await sandHash(page);
+    const breathOn = (): Promise<boolean> => page.evaluate(() => window.__rakeMe!.state().settings.breathEnabled);
+    const panelOf = (): Promise<string> => page.evaluate(() => window.__rakeMe!.state().panel);
+    // breath sits above menu in the HUD's right-hand column, with a one-pixel gap between the rows
+    const column = await page.evaluate(() => {
+      const api = window.__rakeMe!;
+      const { fbW, fbH } = api.fbSize();
+      const rect = document.getElementById("garden-canvas")!.getBoundingClientRect();
+      const hits = api.overlayHits();
+      const find = (id: string) => hits.find((h) => h.action.type === "hud" && (h.action as { id: string }).id === id)!;
+      const up = find("breath");
+      const down = find("menu");
+      const client = (x: number, y: number) => ({ x: rect.left + (x / fbW) * rect.width, y: rect.top + (y / fbH) * rect.height });
+      const gapTop = up.y + up.h;
+      const gap = down.y - gapTop;
+      const x = up.x + up.w / 2;
+      return {
+        gap,
+        nearDown: client(x, gapTop + gap * 0.8),
+        nearUp: client(x, gapTop + gap * 0.2),
+        breath: client(x, up.y + up.h / 2),
+        menu: client(x, down.y + down.h / 2),
+      };
+    });
+    expect(column.gap, "a gap between the HUD rows").toBeGreaterThan(0);
+
+    // 1. In the gap, nearer the lower row: menu, not the row above
+    const breath0 = await breathOn();
+    await touchTap(cdp, column.nearDown.x, column.nearDown.y, 201);
+    await page.evaluate(() => window.__rakeMe!.advance(0));
+    expect(await panelOf()).toBe("settings");
+    expect(await breathOn()).toBe(breath0);
+    await touchTap(cdp, column.menu.x, column.menu.y, 202);
+    await page.evaluate(() => window.__rakeMe!.advance(0));
+    expect(await panelOf()).toBe("none");
+
+    // 2. In the gap, nearer the upper row: breath
+    await touchTap(cdp, column.nearUp.x, column.nearUp.y, 203);
+    await page.evaluate(() => window.__rakeMe!.advance(0));
+    expect(await breathOn()).toBe(!breath0);
+    expect(await panelOf()).toBe("none");
+
+    // 3. A thumb that lands on breath and settles onto menu before lifting presses menu only
+    await touchSlide(cdp, 204, [column.breath, column.menu]);
+    await page.evaluate(() => window.__rakeMe!.advance(0));
+    expect(await breathOn(), "nothing acts while the thumb is down").toBe(!breath0);
+    expect(await panelOf()).toBe("none");
+    await touchLift(cdp);
+    await page.evaluate(() => window.__rakeMe!.advance(0));
+    expect(await panelOf()).toBe("settings");
+    expect(await breathOn()).toBe(!breath0);
+    await touchTap(cdp, column.menu.x, column.menu.y, 205);
+    await page.evaluate(() => window.__rakeMe!.advance(0));
+
+    // 4. A thumb just off the exposed top-right corner of breath, diagonally, inside the slop: breath
+    const corner = await page.evaluate(() => {
+      const api = window.__rakeMe!;
+      const { fbW, fbH } = api.fbSize();
+      const rect = document.getElementById("garden-canvas")!.getBoundingClientRect();
+      const hit = api.overlayHits().find((h) => h.action.type === "hud" && (h.action as { id: string }).id === "breath")!;
+      // 7.6 CSS px from the corner, just inside the 8 px slop
+      const off = (5.4 / rect.width) * fbW;
+      const x = hit.x + hit.w + off;
+      const y = hit.y - off;
+      const free = !api.overlayHits().some((h) => x >= h.x && y >= h.y && x < h.x + h.w && y < h.y + h.h);
+      return { free, x: rect.left + (x / fbW) * rect.width, y: rect.top + (y / fbH) * rect.height };
+    });
+    expect(corner.free, "the corner point is outside every control").toBe(true);
+    const breath1 = await breathOn();
+    await touchTap(cdp, corner.x, corner.y, 207);
+    await page.evaluate(() => window.__rakeMe!.advance(0));
+    expect(await breathOn()).toBe(!breath1);
+    await touchTap(cdp, corner.x, corner.y, 208);
+    await page.evaluate(() => window.__rakeMe!.advance(0));
+    expect(await breathOn()).toBe(breath1);
+
+    // 5. A thumb that slides off every object before lifting presses nothing, and rakes nothing
+    const sand = await sandClient(page, 96, 56);
+    await touchSlide(cdp, 206, lerp(column.breath, sand, 6));
+    await touchLift(cdp);
+    await page.evaluate(() => window.__rakeMe!.advance(0));
+    expect(await breathOn()).toBe(!breath0);
+    expect(await panelOf()).toBe("none");
+    expect(await sandHash(page)).toBe(h0);
+    expect(errors).toEqual([]);
+  });
+
   test("Touch feel: frame-edge strokes, rake lift under the thumb, stones that never jump, a placement prompt, stale touches and mobile viewport events", async ({
     page,
   }) => {

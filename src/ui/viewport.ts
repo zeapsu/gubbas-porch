@@ -33,6 +33,43 @@ export function boundedViewportSide(stageSide: number, windowSide: number, visua
   return side;
 }
 
+/**
+ * True when a screen orientation angle (`screen.orientation.angle`, or the older `window.orientation`) has the
+ * screen on its side. Both count from the phone held upright, so 90, -90 and 270 are on its side.
+ */
+export function isSidewaysAngle(angle: number): boolean {
+  return Math.abs(angle) % 180 === 90;
+}
+
+/** Width in CSS pixels of a screen of screenW × screenH (either way round) as it is held now. */
+export function screenWidthFor(screenW: number, screenH: number, sideways: boolean): number {
+  return sideways ? Math.max(screenW, screenH) : Math.min(screenW, screenH);
+}
+
+/** Height in CSS pixels of a screen of screenW × screenH (either way round) as it is held now. */
+export function screenHeightFor(screenW: number, screenH: number, sideways: boolean): number {
+  return sideways ? Math.min(screenW, screenH) : Math.max(screenW, screenH);
+}
+
+/**
+ * One side of the stage that is actually on the screen, in CSS pixels, for a web app that fills the whole screen.
+ *
+ * An installed web app on iOS that is shown upright and then turned on its side can keep its whole layout at the
+ * upright size: the window, the visual viewport, `100dvh` and every fixed box agree with each other and are all
+ * taller than the screen, so no layout measure can show it. The screen's own size cannot go stale that way. The
+ * page starts at the screen's corner, so the stage reaches from `stageStart` to the screen's far edge less its
+ * trailing safe-area inset `endInset`, and never further than its own side. Nothing here is taken from the
+ * window, so it holds whether the stage or the window settles first. With the stage or the screen unknown (zero,
+ * negative or not a number) the stage is returned unchanged; a stage that is known but lies wholly off the screen
+ * gets 1, never 0, which would read as unknown and hand the canvas back to the stale window.
+ */
+export function onScreenSide(stageSide: number, stageStart: number, endInset: number, screenSide: number): number {
+  if (!(stageSide > 0) || !(screenSide > 0)) return stageSide;
+  const start = stageStart > 0 ? stageStart : 0;
+  const inset = endInset > 0 ? endInset : 0;
+  return Math.max(1, Math.min(stageSide, screenSide - start - inset));
+}
+
 /** True when a window of cssW × cssH CSS pixels should show the turn-sideways prompt instead of the garden. */
 export function needsLandscape(cssW: number, cssH: number): boolean {
   return cssW < PHONE_MAX_WIDTH && cssH > cssW * UPRIGHT_RATIO;
