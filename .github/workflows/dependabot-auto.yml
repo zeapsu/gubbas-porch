@@ -34,7 +34,7 @@ jobs:
       # workflow_run always runs in the default-branch context, so this checks out trusted `main`.
       # Never check out the PR ref here: this job holds a write token.
       - name: Checkout trusted default branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
