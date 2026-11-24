@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
-test.describe("Rake Me — 3D 8-bit Zen Garden E2E", () => {
-  test("smoke: loads under /rake-me/, WebGL2 active, all 30 real Blender GLBs loaded, zero console/request errors", async ({
+test.describe("Gubba's Porch — 3D 8-bit Zen Garden E2E", () => {
+  test("smoke: loads under /gubbas-porch/, WebGL2 active, all 30 real Blender GLBs loaded, zero console/request errors", async ({
     page,
   }) => {
     const errors: string[] = [];
@@ -136,33 +136,44 @@ test.describe("Rake Me — 3D 8-bit Zen Garden E2E", () => {
     expect(swapped).toEqual({ moodSetting: "auto", variant: "lantern" });
   });
 
-  test("portrait phone (390x844): all 4 Settings tabs remain strictly onscreen in Crisp and Chunky", async ({
+  test("portrait phone (390x844): the turn-sideways prompt covers the garden; turned to 844x390 all 4 Settings tabs are onscreen in Crisp and Chunky", async ({
     page,
   }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto("?test=1");
     await page.waitForFunction(() => Boolean(window.__rakeMe));
-    await page.locator("#title-card").click();
 
-    for (const density of ["crisp", "chunky"] as const) {
+    // Upright, the garden waits behind the prompt (DESIGN.md D8); tests/e2e/viewports.spec.ts covers it in depth
+    await expect(page.locator("#rotate-prompt")).toBeVisible();
+    expect(await page.evaluate(() => window.__rakeMe!.state().rotateBlocked)).toBe(true);
+
+    const tabsOnscreen = async (density: "crisp" | "chunky") => {
       await page.evaluate((d) => {
         window.__rakeMe!.setDensity(d);
         window.__rakeMe!.openPanel("settings", "look");
       }, density);
-
-      const tabCheck = await page.evaluate(() => {
+      return page.evaluate(() => {
         const api = window.__rakeMe!;
         const { fbW, fbH } = api.fbSize();
         const tabs = api.overlayHits().filter((h) => h.action.type === "tab");
         return {
-          fbW,
-          fbH,
           count: tabs.length,
           allOnscreen: tabs.every((t) => t.x >= 0 && t.y >= 0 && t.x + t.w <= fbW && t.y + t.h <= fbH),
         };
       });
-      expect(tabCheck.count, `density=${density}`).toBe(4);
-      expect(tabCheck.allOnscreen, `density=${density}`).toBe(true);
+    };
+
+    // The overlay behind the prompt still lays out inside the framebuffer
+    for (const density of ["crisp", "chunky"] as const) {
+      expect(await tabsOnscreen(density), `upright density=${density}`).toEqual({ count: 4, allOnscreen: true });
+    }
+
+    // Turned sideways the prompt leaves and the garden plays
+    await page.setViewportSize({ width: 844, height: 390 });
+    await expect(page.locator("#rotate-prompt")).toBeHidden();
+    await page.locator("#title-card").click();
+    for (const density of ["crisp", "chunky"] as const) {
+      expect(await tabsOnscreen(density), `landscape density=${density}`).toEqual({ count: 4, allOnscreen: true });
     }
   });
 

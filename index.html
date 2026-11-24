@@ -3,8 +3,23 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="description" content="Rake Me — a quiet 3D 8-bit Zen garden for pure relaxation." />
-    <title>Rake Me</title>
+    <meta name="description" content="Gubba's Porch — a quiet 3D 8-bit Zen garden for pure relaxation." />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Gubba's Porch" />
+    <meta property="og:description" content="A quiet 3D 8-bit Zen garden for pure relaxation — raked sand, ten tools on the wall, retro chimes, and Gubba on the porch." />
+    <meta property="og:url" content="https://zeapsu.github.io/gubbas-porch/" />
+    <meta property="og:image" content="https://zeapsu.github.io/gubbas-porch/social-preview.png" />
+    <meta property="og:image:width" content="1280" />
+    <meta property="og:image:height" content="640" />
+    <meta property="og:image:alt" content="Gubba's Porch — 3D 8-bit Zen garden with raked sand, wooden Wall of Rakes, and Gubba resting on the engawa" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Gubba's Porch" />
+    <meta name="twitter:description" content="A quiet 3D 8-bit Zen garden for pure relaxation — raked sand, ten tools on the wall, retro chimes, and Gubba on the porch." />
+    <meta name="twitter:image" content="https://zeapsu.github.io/gubbas-porch/social-preview.png" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="./favicon-32.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon.png" />
+    <title>Gubba's Porch</title>
     <style>
       *,
       *::before,
@@ -23,17 +38,25 @@
         font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
         user-select: none;
         -webkit-user-select: none;
+        -webkit-touch-callout: none;
+        -webkit-tap-highlight-color: transparent;
         touch-action: none;
       }
+      /* The canvas is an exact integer multiple of the framebuffer and never larger than the window; the
+         renderer centres it on a whole device pixel, and any leftover shows this ink background as a hairline. */
       #stage {
         position: fixed;
-        inset: 0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
+        top: env(safe-area-inset-top, 0px);
+        right: env(safe-area-inset-right, 0px);
+        bottom: env(safe-area-inset-bottom, 0px);
+        left: env(safe-area-inset-left, 0px);
+        overflow: hidden;
         background: #2a1d1a;
       }
       #garden-canvas {
+        position: absolute;
+        left: 0;
+        top: 0;
         display: block;
         image-rendering: pixelated;
         image-rendering: crisp-edges;
@@ -47,6 +70,8 @@
         align-items: center;
         justify-content: center;
         gap: 12px;
+        padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+          max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
         background: rgba(42, 29, 26, 0.72);
         color: #f4ead0;
         cursor: pointer;
@@ -62,7 +87,8 @@
         box-shadow: 4px 4px 0 #2a1d1a;
         padding: 20px 28px;
         text-align: center;
-        max-width: 340px;
+        max-width: min(340px, calc(100vw - 32px));
+        max-height: calc(100vh - 32px);
       }
       .card-title {
         font-size: 20px;
@@ -87,21 +113,60 @@
       #webgl2-fallback[hidden] {
         display: none;
       }
-      #portrait-hint {
+      /* An upright phone is asked to turn sideways (DESIGN.md 2.4, D8). The prompt covers the garden and takes
+         every tap until the window is wide again; main.ts shows and hides it. */
+      #rotate-prompt {
         position: fixed;
-        top: 10px;
-        left: 50%;
-        transform: translateX(-50%);
-        background: #f4ead0;
-        color: #2a1d1a;
-        border: 2px solid #2a1d1a;
-        padding: 4px 10px;
-        font-size: 11px;
-        z-index: 15;
-        pointer-events: none;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+          max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+        background: rgba(42, 29, 26, 0.72);
+        z-index: 30;
+        outline: none;
       }
-      #portrait-hint[hidden] {
+      #rotate-prompt[hidden] {
         display: none;
+      }
+      .rotate-art {
+        display: block;
+        width: 144px;
+        height: 96px;
+        margin: 0 auto 14px;
+        image-rendering: pixelated;
+      }
+      .rotate-arrow {
+        animation: rotate-nudge 2.4s steps(1, end) infinite;
+      }
+      @keyframes rotate-nudge {
+        0%,
+        60% {
+          transform: translate(0, 0);
+        }
+        61%,
+        100% {
+          transform: translate(1px, 1px);
+        }
+      }
+      #rotate-prompt .card-sub {
+        line-height: 1.5;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .rotate-arrow {
+          animation: none;
+        }
+      }
+      /* Short windows (a phone on its side): tighter card so it keeps clear margins. */
+      @media (max-height: 420px) {
+        .card-box {
+          padding: 12px 22px;
+        }
+        .card-title {
+          font-size: 17px;
+          margin-bottom: 4px;
+        }
       }
       .sr-only {
         position: absolute;
@@ -118,21 +183,72 @@
   </head>
   <body>
     <main id="stage">
-      <canvas id="garden-canvas" tabindex="-1" aria-label="Rake Me 3D 8-bit Zen garden"></canvas>
+      <canvas id="garden-canvas" tabindex="-1" aria-label="Gubba's Porch 3D 8-bit Zen garden"></canvas>
     </main>
 
-    <div id="title-card" role="button" tabindex="0" aria-label="Enter the Zen garden">
+    <div id="title-card" role="button" tabindex="0" aria-label="Enter Gubba's Porch">
       <div class="card-box">
-        <p class="card-title">RAKE ME</p>
+        <p class="card-title">GUBBA'S PORCH</p>
         <p class="card-sub">press anywhere</p>
       </div>
     </div>
 
-    <div id="portrait-hint" hidden>landscape shows more garden</div>
+    <div
+      id="rotate-prompt"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="rotate-title"
+      aria-describedby="rotate-text"
+      tabindex="-1"
+      hidden
+    >
+      <div class="card-box">
+        <!-- Pixel art in the Warm Cedar palette: an upright phone, an arrow, the phone on its side with raked sand. -->
+        <svg class="rotate-art" viewBox="0 0 48 32" shape-rendering="crispEdges" aria-hidden="true" focusable="false">
+          <g fill="#b39a6b">
+            <rect x="5" y="5" width="10" height="1" />
+            <rect x="5" y="26" width="10" height="1" />
+            <rect x="4" y="6" width="1" height="20" />
+            <rect x="15" y="6" width="1" height="20" />
+            <rect x="9" y="24" width="2" height="1" />
+          </g>
+          <g class="rotate-arrow" fill="#2a1d1a">
+            <rect x="20" y="3" width="4" height="1" />
+            <rect x="18" y="4" width="2" height="1" />
+            <rect x="24" y="4" width="2" height="1" />
+            <rect x="26" y="5" width="1" height="1" />
+            <rect x="27" y="6" width="1" height="1" />
+            <rect x="28" y="7" width="1" height="2" />
+            <rect x="29" y="9" width="1" height="4" />
+            <rect x="27" y="10" width="1" height="1" />
+            <rect x="31" y="10" width="1" height="1" />
+            <rect x="28" y="11" width="1" height="1" />
+            <rect x="30" y="11" width="1" height="1" />
+          </g>
+          <rect x="21" y="17" width="22" height="10" fill="#d9c492" />
+          <g fill="#b39a6b">
+            <rect x="24" y="19" width="15" height="1" />
+            <rect x="24" y="21" width="15" height="1" />
+            <rect x="24" y="23" width="15" height="1" />
+          </g>
+          <g fill="#2a1d1a">
+            <rect x="21" y="16" width="22" height="1" />
+            <rect x="21" y="27" width="22" height="1" />
+            <rect x="20" y="17" width="1" height="10" />
+            <rect x="43" y="17" width="1" height="10" />
+            <rect x="41" y="21" width="1" height="2" />
+          </g>
+        </svg>
+        <p class="card-title" id="rotate-title">TURN SIDEWAYS</p>
+        <p class="card-sub" id="rotate-text">
+          This garden is wide. Turn your screen on its side, or widen the window. The sand will wait.
+        </p>
+      </div>
+    </div>
 
     <div id="webgl2-fallback" hidden>
       <div class="card-box">
-        <p class="card-title">RAKE ME</p>
+        <p class="card-title">GUBBA'S PORCH</p>
         <p class="card-sub">this garden needs WebGL2</p>
       </div>
     </div>

@@ -83,9 +83,16 @@ export function sweepFront(e: number, gy: number, w = 192, h = 112): number {
   return -8 + (w + 16) * e + 4 * Math.sin((Math.PI * gy) / h);
 }
 
-/** Integer pixel scale: k = max(1, round(deviceH / targetRows)). */
-export function pixelScaleFor(deviceH: number, density: "crisp" | "chunky"): number {
-  return Math.max(1, Math.round(deviceH / (density === "chunky" ? 137 : 205)));
-}
-
 export const TARGET_ROWS = { crisp: 205, chunky: 137 } as const;
+/** The reference 1456 × 820 window at each density: the columns a view needs to show the whole garden. */
+export const TARGET_COLS = { crisp: 364, chunky: 243 } as const;
+
+/**
+ * Integer pixel scale: k = max(1, round(min(deviceH / targetRows, deviceW / targetCols))).
+ * A landscape window is bound by its height, as before. A window narrower than the reference shape is bound by
+ * its width instead, so a tall or split-screen window keeps as many pixels across the garden as a desktop does
+ * rather than a few very large ones. Leaving `deviceW` out gives the height rule alone.
+ */
+export function pixelScaleFor(deviceH: number, density: "crisp" | "chunky", deviceW: number = Infinity): number {
+  return Math.max(1, Math.round(Math.min(deviceH / TARGET_ROWS[density], deviceW / TARGET_COLS[density])));
+}

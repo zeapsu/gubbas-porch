@@ -2,8 +2,9 @@
 //   1 shadow   1024² orthographic depth from the mood's light, fitted to radius 215 round (24, 10, 0)
 //   2 scene    low-res two-attachment G-buffer + depth texture, NearestFilter, no MSAA
 //   3 resolve  G-buffer → 32-colour palette: cel steps, Bayer 4×4 dither, shadow cap, sky bands, ink outlines
-//   4 overlay  palette-indexed HUD and text pixels over the resolved frame (same pixel size as the scene)
-//   5 present  nearest-neighbour blit to the canvas at integer scale k
+//   4 overlay  palette-indexed HUD and text pixels over the resolved frame, where they share the scene's pixel size
+//   5 present  nearest-neighbour blit to the canvas at integer scale k; in a narrow window the overlay has a
+//              larger whole-number pixel size of its own and is laid over the blit here instead of in pass 4
 // The shadow pass is an unfiltered single-sample depth compare, i.e. Three's BasicShadowMap semantics, done with
 // our own depth material so the G-buffer shader can test shadows per pixel with the slope-scaled bias.
 
@@ -57,10 +58,14 @@ export interface FramebufferSize {
   scale: number;
 }
 
-/** Framebuffer size for a device-pixel window: k = max(1, round(deviceH / targetRows)), fb = ceil(device / k). */
+/**
+ * Framebuffer size for a device-pixel window: k from `pixelScaleFor`, fb = floor(device / k). Rounding down keeps
+ * the canvas (fb · k) inside the window, so no scene pixel is ever cropped; what is left over, at most k − 1
+ * device pixels per axis, shows the page's ink background as a hairline border.
+ */
 export function framebufferFor(deviceW: number, deviceH: number, density: PixelDensity): FramebufferSize {
-  const scale = pixelScaleFor(Math.max(1, deviceH), density);
-  return { fbW: Math.max(1, Math.ceil(deviceW / scale)), fbH: Math.max(1, Math.ceil(deviceH / scale)), scale };
+  const scale = pixelScaleFor(Math.max(1, deviceH), density, Math.max(1, deviceW));
+  return { fbW: Math.max(1, Math.floor(deviceW / scale)), fbH: Math.max(1, Math.floor(deviceH / scale)), scale };
 }
 
 function rampUniforms(): { slots: number[]; lens: number[] } {
@@ -127,6 +132,10 @@ export class RenderPipeline {
   private readonly lastRig: CameraRig = { target: { x: 0, y: 0, z: 0 }, az: 0, el: 0, dist: 1 };
   private readonly camPosBuf = { x: 0, y: 0, z: 0 };
   private garden: GardenScene | null = null;
+  // overlay canvas: its size and device pixels per overlay pixel (see `setOverlayGrid`)
+  private uiW = 1;
+  private uiH = 1;
+  private uiK = 1;
   private readBuf = new Uint8Array(4);
   private readonly pickBuf = new Uint8Array(4);
 
@@ -230,7 +239,13 @@ export class RenderPipeline {
       fragmentShader: PRESENT_FRAGMENT,
       depthTest: false,
       depthWrite: false,
-      uniforms: { tFinal: { value: this.finalRT.texture }, uScale: { value: 1 } },
+      uniforms: {
+        tFinal: { value: this.finalRT.texture },
+        tOverlay: { value: this.overlayTex },
+        tPalette: { value: this.paletteTex },
+        uScale: { value: 1 },
+        uUi: { value: new Vector3(0, 1, 1) },
+      },
     });
     this.resolveScene = fullscreen(this.resolveMat);
     this.overlayScene = fullscreen(this.overlayMat);
@@ -270,7 +285,8 @@ export class RenderPipeline {
   /**
    * Sizes the framebuffer for a window of deviceW × deviceH device pixels. The canvas backing store becomes
    * exactly fb · k device pixels and its CSS size that divided by `devicePixelRatio`, so every scene pixel is
-   * k × k device pixels.
+   * k × k device pixels. The canvas is centred on a whole device pixel, so the pixel grid never lands on a
+   * half pixel and no row or column is drawn wider than its neighbours.
    */
   resize(deviceW: number, deviceH: number, density: PixelDensity, devicePixelRatio = 1): FramebufferSize {
     const size = framebufferFor(deviceW, deviceH, density);
@@ -282,6 +298,8 @@ export class RenderPipeline {
     const dpr = devicePixelRatio > 0 ? devicePixelRatio : 1;
     this.canvas.style.width = `${cw / dpr}px`;
     this.canvas.style.height = `${ch / dpr}px`;
+    this.canvas.style.left = `${Math.max(0, Math.floor((deviceW - cw) / 2)) / dpr}px`;
+    this.canvas.style.top = `${Math.max(0, Math.floor((deviceH - ch) / 2)) / dpr}px`;
     (this.presentMat.uniforms.uScale as IUniform<number>).value = size.scale;
     if (size.fbW !== this.fbW || size.fbH !== this.fbH) {
       this.fbW = size.fbW;
@@ -290,22 +308,44 @@ export class RenderPipeline {
       this.gbuffer.dispose();
       this.resolveRT.dispose();
       this.finalRT.dispose();
-      this.overlayTex.dispose();
       this.gbuffer = this.makeGBuffer(this.fbW, this.fbH);
       this.resolveRT = makeTarget(this.fbW, this.fbH);
       this.finalRT = makeTarget(this.fbW, this.fbH);
-      this.overlayTex = this.makeOverlayTex(new Uint8Array(this.fbW * this.fbH).fill(255), this.fbW, this.fbH);
       const ru = this.resolveMat.uniforms;
       (ru.tG0 as IUniform).value = this.gbuffer.textures[0];
       (ru.tG1 as IUniform).value = this.gbuffer.textures[1];
       (ru.tDepth as IUniform).value = this.gbuffer.depthTexture;
       (this.overlayMat.uniforms.tScene as IUniform).value = this.resolveRT.texture;
-      (this.overlayMat.uniforms.tOverlay as IUniform).value = this.overlayTex;
       (this.presentMat.uniforms.tFinal as IUniform).value = this.finalRT.texture;
       (this.shared.uFbSize as IUniform<Vector2>).value.set(this.fbW, this.fbH);
       this.readBuf = new Uint8Array(this.fbW * this.fbH * 4);
     }
+    // until the overlay says otherwise it shares the scene's grid
+    this.setOverlayGrid(this.fbW, this.fbH, this.scale);
     return { fbW: this.fbW, fbH: this.fbH, scale: this.scale };
+  }
+
+  /**
+   * Tells the pipeline the overlay canvas it will be handed: uiW × uiH palette indices, each shown as uiK × uiK
+   * device pixels from the canvas's bottom-left corner. When that is the scene's own grid the overlay is
+   * composited in pass 4 as ever; otherwise pass 5 lays it over the presented frame.
+   */
+  setOverlayGrid(uiW: number, uiH: number, uiK: number): void {
+    const w = Math.max(1, Math.floor(uiW));
+    const h = Math.max(1, Math.floor(uiH));
+    this.uiK = Math.max(1, Math.floor(uiK));
+    if (w === this.uiW && h === this.uiH && this.overlayTex.image.width === w && this.overlayTex.image.height === h) return;
+    this.uiW = w;
+    this.uiH = h;
+    this.overlayTex.dispose();
+    this.overlayTex = this.makeOverlayTex(new Uint8Array(w * h).fill(255), w, h);
+    (this.overlayMat.uniforms.tOverlay as IUniform).value = this.overlayTex;
+    (this.presentMat.uniforms.tOverlay as IUniform).value = this.overlayTex;
+  }
+
+  /** True when the overlay canvas is the framebuffer's own pixel grid, so pass 4 can composite it. */
+  private overlayOnSceneGrid(): boolean {
+    return this.uiK === this.scale && this.uiW === this.fbW && this.uiH === this.fbH;
   }
 
   /**
@@ -403,17 +443,19 @@ export class RenderPipeline {
     r.setRenderTarget(this.resolveRT);
     r.render(this.resolveScene, this.fsCamera);
 
-    // pass 4: overlay
-    const on = overlay !== null && overlay.length === this.fbW * this.fbH;
+    // pass 4: overlay, when it shares the scene's pixel grid
+    const on = overlay !== null && overlay.length === this.uiW * this.uiH;
+    const shared = this.overlayOnSceneGrid();
     if (on) {
       this.overlayTex.image.data = overlay;
       this.overlayTex.needsUpdate = true;
     }
-    (this.overlayMat.uniforms.uOverlayOn as IUniform<number>).value = on ? 1 : 0;
+    (this.overlayMat.uniforms.uOverlayOn as IUniform<number>).value = on && shared ? 1 : 0;
     r.setRenderTarget(this.finalRT);
     r.render(this.overlayScene, this.fsCamera);
 
-    // pass 5: present
+    // pass 5: present, with the overlay laid over it when it has a pixel size of its own
+    (this.presentMat.uniforms.uUi as IUniform<Vector3>).value.set(on && !shared ? this.uiK : 0, this.uiW, this.uiH);
     r.setRenderTarget(null);
     r.render(this.presentScene, this.fsCamera);
     this.drawCalls = r.info.render.calls;
@@ -434,12 +476,49 @@ export class RenderPipeline {
     return this.garden ? this.garden.pickResult(part) : { kind: "none" };
   }
 
+  /**
+   * Framebuffer bounding boxes (inclusive pixels, origin top-left) of everything pickable in the last G-buffer,
+   * keyed "gubba", "basket", "rake:<id>" and "element:<id>". One full read of the part-id channel; for tests.
+   */
+  pickBounds(): Record<string, { minX: number; minY: number; maxX: number; maxY: number; count: number }> {
+    const w = this.fbW;
+    const h = this.fbH;
+    const out: Record<string, { minX: number; minY: number; maxX: number; maxY: number; count: number }> = {};
+    if (!this.garden) return out;
+    this.renderer.readRenderTargetPixels(this.gbuffer, 0, 0, w, h, this.readBuf);
+    const keys = new Map<number, string | null>();
+    for (let row = 0; row < h; row++) {
+      const y = h - 1 - row;
+      for (let x = 0; x < w; x++) {
+        const part = this.readBuf[(row * w + x) * 4 + 3] ?? 0;
+        if (part === 0) continue;
+        let key = keys.get(part);
+        if (key === undefined) {
+          const r = this.garden.pickResult(part);
+          key = r.kind === "none" ? null : r.id ? `${r.kind}:${r.id}` : r.kind;
+          keys.set(part, key);
+        }
+        if (key === null) continue;
+        const b = (out[key] ??= { minX: x, minY: y, maxX: x, maxY: y, count: 0 });
+        if (x < b.minX) b.minX = x;
+        if (x > b.maxX) b.maxX = x;
+        if (y < b.minY) b.minY = y;
+        if (y > b.maxY) b.maxY = y;
+        b.count++;
+      }
+    }
+    return out;
+  }
+
   /** The pointer ray against the sand plane y = 3, in float grid coordinates; null if it misses the plane. */
   sandPoint(fbX: number, fbY: number): Vec2 | null {
     return sandPointFromRay(this.lastRig, fbX, fbY, this.fbW, this.fbH);
   }
 
-  /** The resolved low-res frame as RGBA rows, top row first. `includeOverlay` false omits pass 4. */
+  /**
+   * The resolved low-res frame as RGBA rows, top row first. `includeOverlay` false omits pass 4. In a narrow
+   * window the overlay has its own pixel size and is not part of the low-res frame either way.
+   */
   readPixels(includeOverlay = true): Uint8Array {
     const w = this.fbW;
     const h = this.fbH;
@@ -450,14 +529,30 @@ export class RenderPipeline {
     return out;
   }
 
-  /** Pixels of the resolved frame (overlay included) that are not one of the 32 colours on screen. */
+  /**
+   * Pixels on screen that are not one of the 32 colours. Executes the present pass (pass 5, including any
+   * independently scaled overlay) into an offscreen target of the exact canvas backing size and inspects every
+   * presented pixel against the active 32-colour palette. Called in tests, never in the frame loop.
+   */
   paletteViolations(): number {
-    const px = this.readPixels(true);
-    let bad = 0;
-    for (let i = 0; i < px.length; i += 4) {
-      if (!this.paletteSet.has(((px[i] ?? 0) << 16) | ((px[i + 1] ?? 0) << 8) | (px[i + 2] ?? 0))) bad++;
+    const cw = Math.max(1, this.fbW * this.scale);
+    const ch = Math.max(1, this.fbH * this.scale);
+    const rt = makeTarget(cw, ch);
+    const prevTarget = this.renderer.getRenderTarget();
+    try {
+      this.renderer.setRenderTarget(rt);
+      this.renderer.render(this.presentScene, this.fsCamera);
+      const px = new Uint8Array(cw * ch * 4);
+      this.renderer.readRenderTargetPixels(rt, 0, 0, cw, ch, px);
+      let bad = 0;
+      for (let i = 0; i < px.length; i += 4) {
+        if (!this.paletteSet.has(((px[i] ?? 0) << 16) | ((px[i + 1] ?? 0) << 8) | (px[i + 2] ?? 0))) bad++;
+      }
+      return bad;
+    } finally {
+      this.renderer.setRenderTarget(prevTarget);
+      rt.dispose();
     }
-    return bad;
   }
 
   /** A nearest-neighbour PNG of the resolved frame at an integer scale (4, 6, 8 or 12 in the menu). */

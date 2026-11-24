@@ -13,17 +13,17 @@ Linters, typechecks, tests, and asset/bundle verifiers own style and mechanical 
 - **Keep docs honest**: Flag code that violates `AGENTS.md` / `DESIGN.md` invariants, or changes that leave `AGENTS.md` or `REVIEW.md` stale.
 - **Fix repeated comments at the source**: If a defect class appears twice, add a lint rule, unit/property test, or update `AGENTS.md` / `REVIEW.md`.
 
-## 2. What Failure Looks Like in `rake-me`
+## 2. What Failure Looks Like in `gubbas-porch`
 
 | Area | What failure looks like |
 | --- | --- |
 | **Sand & rakes (`src/sand/**`, `src/rakes/**`)** | Dotted/gapped strokes on fast pointer drags, non-deterministic or frame-rate-dependent carving, `NaN`/out-of-bounds grid writes, grooves mutating `rock !== 0` cells, broken flow/deflection around stones, `halfWidth > 2 * L`, or rake profile disagreeing with `assets/models.spec.json` tine counts. |
-| **3D 8-bit pipeline (`src/render/**`)** | Off-palette pixels (`paletteViolations() > 0`), MSAA/linear color filtering/alpha blending/bloom sneaking in, non-integer canvas scaling, WebGL resource leaks (missing `.dispose()` on targets/geometries/materials/textures), per-frame allocations in hot loops, > 60 draw calls, or camera moving while a rake stroke is active. |
+| **3D 8-bit pipeline (`src/render/**`)** | Off-palette pixels (`paletteViolations() > 0`), MSAA/linear color filtering/alpha blending/bloom sneaking in, non-integer canvas scaling, WebGL resource leaks (missing `.dispose()` on targets/geometries/materials/textures), per-frame allocations in hot loops, > 60 draw calls, camera moving while a rake stroke is active, or a hero object (bed, hanging rake, Gubba, stone basket) or an overlay control leaving the framebuffer in any popular viewport (`tests/e2e/viewports.spec.ts`). |
 | **Gubba & Zen UX (`src/gubba/**`, `src/ui/**`)** | Anything stressful or intrusive: timers, scores, pop-ups, tutorials, text covering the sand, Gubba speaking more often than 90 s in "Now and then" or speaking in "Quiet", lines > 96 chars or > 3 wrapped lines, or missing accessible DOM mirror / `aria-live` updates. |
 | **Audio (`src/audio/**`)** | Creating `AudioContext` before user gesture, step gain changes without ramps (clicks/pops), oscillators without scheduled `stop()` + disconnect on `ended`, mute failing to zero master gain, or non-pure `composer.events`. |
 | **Blender asset pipeline (`scripts/blender/**`, `assets/**`, `public/assets/**`)** | Modifying non-`RM_` scenes/datablocks or calling `read_factory_settings` in live Blender, hardcoded localized shader node names instead of node `type`, hardcoded exporter enums, missing/corrupt `.glb` files, or exceeding triangle/byte budgets in `assets/models.spec.json`. |
 | **Module boundaries & state (`src/state/**`, imports)** | `three` imported outside `src/render/**` or `src/main.ts`; `window`/`document`/`Date`/`Math.random` inside pure modules (`sand`, `rakes`, `gubba`, `audio/composer.ts`, camera math); `decode()` throwing on corrupt `localStorage` data. |
-| **CI, deploy & security (`.github/**`, config)** | Broken `BASE_PATH` (`/rake-me/` vs `/`) causing 404 assets on GitHub Pages, external network calls after initial load, `eval`/`new Function`/`innerHTML`, leaked secrets, over-privileged GitHub Actions tokens, or weakened review/CI gates. |
+| **CI, deploy & security (`.github/**`, config)** | Broken `BASE_PATH` (`/gubbas-porch/` vs `/`) causing 404 assets on GitHub Pages, external network calls after initial load, `eval`/`new Function`/`innerHTML`, leaked secrets, over-privileged GitHub Actions tokens, or weakened review/CI gates. |
 
 ## 3. Paths to Skip
 

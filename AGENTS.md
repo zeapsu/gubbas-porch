@@ -1,14 +1,14 @@
 # Agent Instructions (`AGENTS.md`)
 
-Short operational guide for all coding, design, asset, and review agents working in `rake-me`.
+Short operational guide for all coding, design, asset, and review agents working in `gubbas-porch` (Gubba's Porch).
 Read [DESIGN.md](./DESIGN.md) for product/architecture truth and [REVIEW.md](./REVIEW.md) for review standards before making changes.
 
 ## 1. Project Snapshot
 
-- **What this is**: *Rake Me* — a serene, zero-stress **3D 8-bit Zen garden** for the browser with real 3D sand raking, a 3D Wall of Rakes, a silly/funky 3D caretaker named Gubba, and procedural retro Web Audio.
+- **What this is**: *Gubba's Porch* — a serene, zero-stress **3D 8-bit Zen garden** for the browser with real 3D sand raking, a 3D Wall of Rakes, a silly/funky 3D caretaker named Gubba, and procedural retro Web Audio.
 - **Stack**: TypeScript (strict), Vite, **Three.js** (WebGL2, sole runtime dependency), Web Audio API, Vitest + fast-check, Playwright, ESLint.
 - **Assets**: Procedural low-poly 3D `.glb` models authored via Python `bpy` scripts in `scripts/blender/` using the Blender MCP (Blender 5.3.0), committed under `public/assets/models/`, governed by `assets/models.spec.json` and `public/assets/manifest.json`.
-- **Hosting**: Static bundle deployed to GitHub Pages (`BASE_PATH=/rake-me/`); must also build cleanly for `BASE_PATH=/`.
+- **Hosting**: Static bundle deployed to GitHub Pages (`BASE_PATH=/gubbas-porch/`); must also build cleanly for `BASE_PATH=/`.
 
 ## 2. Core Non-Negotiables
 
@@ -40,7 +40,7 @@ Every change must pass local verification AND a fresh-context review before open
    ```bash
    npm run verify
    ```
-   Which runs: `typecheck` → `lint` → `verify:assets` → `test:unit` → `build` (`BASE_PATH=/rake-me/` and `/`) → `check:bundle` → `test:e2e`.
+   Which runs: `typecheck` → `lint` → `verify:assets` → `test:unit` → `build` (`BASE_PATH=/gubbas-porch/` and `/`) → `check:bundle` → `test:e2e`.
 2. **Run the CI review gate locally**:
    ```bash
    node .github/scripts/review-gate.mjs

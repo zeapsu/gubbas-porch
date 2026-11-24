@@ -16,9 +16,10 @@ import {
   clampOrbit,
   cloneRig,
   copyRig,
-  framedRig,
   presetRig,
+  projectPoint,
   stepCameraInto,
+  viewportRigInto,
   webgl2Available,
 } from "./render/index.ts";
 import type {
@@ -73,6 +74,7 @@ import {
   bindKeyboard,
   createDomMirror,
   effectiveMood,
+  needsLandscape,
   nextBreathPattern,
   nextCameraPreset,
   nextGubbaVariant,
@@ -103,6 +105,8 @@ interface RakeMeTestApi {
     tab: SettingsTab;
     speech: string | null;
     watchGubbaRake: boolean;
+    /** True while the turn-sideways prompt covers the garden (an upright phone). */
+    rotateBlocked: boolean;
   };
   stroke(points: readonly Vec2[], rakeId?: RakeId): number;
   advance(ms: number): void;
@@ -126,8 +130,15 @@ interface RakeMeTestApi {
   loadPreset(id: PresetId): void;
   pick(fbX: number, fbY: number): ReturnType<RakeRenderer["pick"]>;
   sandPoint(fbX: number, fbY: number): Vec2 | null;
+  /** A world point in framebuffer pixels under the current camera, or null if it is behind the camera. */
+  project(x: number, y: number, z: number): { x: number; y: number } | null;
+  /** Framebuffer bounding boxes of Gubba, the basket, each hanging rake and each placed element. */
+  pickBounds(): ReturnType<RakeRenderer["pickBounds"]>;
+  /** Where the speech scroll is drawn in this framebuffer. */
+  speechRect(): { x: number; y: number; w: number; h: number };
   overlayHits(): ReturnType<RakeRenderer["overlayHits"]>;
-  fbSize(): { fbW: number; fbH: number; scale: number; cssW: number; cssH: number };
+  /** `scale` is device pixels per scene pixel; `uiScale` is scene pixels per overlay pixel. */
+  fbSize(): { fbW: number; fbH: number; scale: number; uiScale: number; cssW: number; cssH: number };
   drawCalls(): number;
   failedModels(): readonly string[];
   standInModels(): readonly string[];
@@ -147,6 +158,10 @@ declare global {
 const SAVE_DEBOUNCE_MS = 1000;
 const CLOCK_RECHECK_MS = 10 * 60 * 1000;
 const HOKI_HOLD_MS = 800;
+const TOUCH_RAKE_HOLD_MS = 350;
+const TOUCH_PREVIEW_LINGER_MS = 2600;
+const TOUCH_HOLD_MOVE_SLOP_PX = 16;
+const HAPTIC_STONE_COOLDOWN_MS = 120;
 const WATCH_SPEED_CELLS_PER_SEC = 40;
 const STATIONARY_FOLEY_TIMEOUT_MS = 80;
 
@@ -183,7 +198,7 @@ function loadInitialGarden(): GardenState | undefined {
 
 function formatExportFilename(now: Date): string {
   const p2 = (n: number): string => String(n).padStart(2, "0");
-  return `rake-me-${now.getFullYear()}${p2(now.getMonth() + 1)}${p2(now.getDate())}-${p2(now.getHours())}${p2(now.getMinutes())}.png`;
+  return `gubbas-porch-${now.getFullYear()}${p2(now.getMonth() + 1)}${p2(now.getDate())}-${p2(now.getHours())}${p2(now.getMinutes())}.png`;
 }
 
 // Precompute hover tag strings once so hover never allocates per frame
@@ -204,14 +219,58 @@ async function boot(): Promise<void> {
   const canvas = document.getElementById("garden-canvas");
   const fallback = document.getElementById("webgl2-fallback");
   const titleCard = document.getElementById("title-card");
-  const portraitHint = document.getElementById("portrait-hint");
+  const rotatePrompt = document.getElementById("rotate-prompt");
+  const stage = document.getElementById("stage");
+  const srControls = document.getElementById("sr-controls");
 
   if (!(canvas instanceof HTMLCanvasElement)) return;
+  const canvasEl: HTMLCanvasElement = canvas;
   if (!webgl2Available()) {
     if (fallback) fallback.hidden = false;
     if (titleCard) titleCard.hidden = true;
     return;
   }
+
+  // An upright phone sees the turn-sideways prompt straight away, with the stage/title card inert and focus inside
+  // the dialog even while models are loading; rotating during boot clears the prompt cleanly without getting stuck.
+  let rotateBlocked = false;
+  let rotatePrevFocus: HTMLElement | null = null;
+  function applyRotateDom(blocked: boolean): void {
+    if (blocked && !rotateBlocked) {
+      const active = document.activeElement;
+      rotatePrevFocus =
+        active instanceof HTMLElement && active !== document.body && active !== document.documentElement
+          ? active
+          : null;
+    }
+    rotateBlocked = blocked;
+    for (const el of [stage, titleCard, srControls]) {
+      if (el) el.inert = blocked;
+    }
+    if (rotatePrompt) {
+      rotatePrompt.hidden = !blocked;
+      if (blocked) {
+        rotatePrompt.focus();
+      } else {
+        const target =
+          rotatePrevFocus && rotatePrevFocus.isConnected && !rotatePrevFocus.closest("[inert]")
+            ? rotatePrevFocus
+            : titleCard && !titleCard.hidden
+              ? titleCard
+              : canvas;
+        rotatePrevFocus = null;
+        if (target instanceof HTMLElement) target.focus();
+      }
+    }
+  }
+  if (rotatePrompt && needsLandscape(window.innerWidth, window.innerHeight)) {
+    applyRotateDom(true);
+  }
+  const onBootResize = (): void => {
+    const blocked = rotatePrompt !== null && needsLandscape(window.innerWidth, window.innerHeight);
+    if (blocked !== rotateBlocked) applyRotateDom(blocked);
+  };
+  window.addEventListener("resize", onBootResize);
 
   const params = new URLSearchParams(window.location.search);
   const testMode = params.get("test") === "1";
@@ -222,6 +281,7 @@ async function boot(): Promise<void> {
   let settings: SettingsState = store.settings;
 
   const renderer = await RakeRenderer.create(canvas);
+  window.removeEventListener("resize", onBootResize);
   const strokeEngine = createStrokeEngine(store.garden.sand);
   const watchEngine = createStrokeEngine(store.garden.sand);
 
@@ -269,11 +329,48 @@ async function boot(): Promise<void> {
     rain: settings.rain,
   });
 
-  // Camera state
+  // Camera state. `orbitRig` is the target preset+orbit+zoom; `orbitCurrent` eases toward it and is fitted at
+  // every intermediate frame via `viewportRigInto` so damping never clips hero objects. `easingPreset` eases
+  // `cameraRig` directly toward `cameraGoal` only during cross-preset transitions.
   let cameraPreset: CameraPresetId = settings.cameraPreset;
-  let cameraGoal: CameraRig = presetRig(cameraPreset);
+  let orbitRig: CameraRig = presetRig(cameraPreset);
+  const orbitCurrent: CameraRig = cloneRig(orbitRig);
+  const cameraGoal: CameraRig = presetRig(cameraPreset);
   const cameraRig: CameraRig = cloneRig(cameraGoal);
-  let userOrbited = false;
+  let easingPreset = false;
+  const capturedPointers = new Set<number>();
+
+  function capturePointer(id: number): void {
+    try {
+      canvasEl.setPointerCapture(id);
+      capturedPointers.add(id);
+    } catch {
+      // Synthetic event fallback
+    }
+  }
+
+  function releasePointer(id: number): void {
+    capturedPointers.delete(id);
+    try {
+      if (canvasEl.hasPointerCapture(id)) canvasEl.releasePointerCapture(id);
+    } catch {
+      // Ignore if already released
+    }
+  }
+
+  function releaseAllCaptures(): void {
+    for (const id of activeTouches.keys()) {
+      capturedPointers.add(id);
+    }
+    for (const id of capturedPointers) {
+      try {
+        if (canvasEl.hasPointerCapture(id)) canvasEl.releasePointerCapture(id);
+      } catch {
+        // Ignore if already released
+      }
+    }
+    capturedPointers.clear();
+  }
 
   // Overlay & panel state
   let panel: OverlayState["panel"] = "none";
@@ -295,9 +392,34 @@ async function boot(): Promise<void> {
   let lastFoleyMoveMs = -Infinity;
   let lastFoleyScreenX = 0.5;
   let foleyStationarySilenced = true;
-  let orbitDrag: { pointerId: number; startX: number; startY: number; az: number; el: number } | null = null;
+  let orbitDrag: { pointerId: number; startX: number; startY: number; az: number; el: number; twoFinger?: boolean } | null = null;
   let pinchDist: number | null = null;
   const activeTouches = new Map<number, { x: number; y: number }>();
+  let touchRakeHold: {
+    id: RakeId;
+    pointerId: number;
+    startMs: number;
+    startEventTs: number;
+    startX: number;
+    startY: number;
+    previewed: boolean;
+  } | null = null;
+  let hokiTouchHold: { pointerId: number; startX: number; startY: number } | null = null;
+  let touchPreviewTag: { id: RakeId; untilMs: number } | null = null;
+  let touchPlacingPointerId: number | null = null;
+  let lastStoneHapticMs = -Infinity;
+  let lastSpeechText: string | null = null;
+
+  function haptic(ms: number): void {
+    if (reducedMotion) return;
+    try {
+      if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") {
+        navigator.vibrate(ms);
+      }
+    } catch {
+      // Ignore blocked or unsupported Web Vibration API
+    }
+  }
 
   const zeroSpeedTelemetry: StrokeTelemetry = {
     active: true,
@@ -408,28 +530,57 @@ async function boot(): Promise<void> {
     watchPlayback = null;
   }
 
-  function applyFramingForCurrentViewport(instant = false): void {
-    const base = userOrbited ? cloneRig(cameraGoal) : presetRig(cameraPreset);
-    if (cameraPreset !== "porch") {
-      cameraGoal = framedRig(base, renderer.fbW, renderer.fbH);
-    } else {
-      cameraGoal = base;
-    }
+  function applyFramingForCurrentViewport(instant = false, presetChanged = false): void {
+    viewportRigInto(cameraGoal, orbitRig, cameraPreset, renderer.fbW, renderer.fbH, renderer.uiScale);
     if (instant || reducedMotion) {
+      copyRig(orbitCurrent, orbitRig);
       copyRig(cameraRig, cameraGoal);
+      easingPreset = false;
+    } else if (presetChanged) {
+      easingPreset = true;
     }
+  }
+
+  /** Applies an orbit or zoom: limits it against the preset, then refits the view so the garden stays framed. */
+  function orbitTo(next: CameraRig): void {
+    orbitRig = clampOrbit(next, CAMERA_PRESETS[cameraPreset].dist);
+    applyFramingForCurrentViewport(false, false);
+  }
+
+  /** Shows the turn-sideways prompt on an upright phone and hands the garden back once it is turned. */
+  function updateRotatePrompt(): void {
+    const blocked = rotatePrompt !== null && needsLandscape(window.innerWidth, window.innerHeight);
+    if (blocked === rotateBlocked) return;
+    if (blocked) {
+      // release pointer captures and clear anything in progress so nothing fires under the prompt
+      releaseAllCaptures();
+      activePointerId = null;
+      hoverRake = null;
+      hasPointerFb = false;
+      orbitDrag = null;
+      pinchDist = null;
+      activeTouches.clear();
+      hokiHoldStartMs = null;
+      hokiTouchHold = null;
+      touchRakeHold = null;
+      touchPreviewTag = null;
+      touchPlacingPointerId = null;
+      movingElement = null;
+      placingKind = null;
+    }
+    applyRotateDom(blocked);
   }
 
   function updateViewportSize(): void {
     if (raking) finishStroke();
     const dpr = window.devicePixelRatio || 1;
-    const deviceW = Math.max(1, Math.round(window.innerWidth * dpr));
-    const deviceH = Math.max(1, Math.round(window.innerHeight * dpr));
+    const cssW = stage && stage.clientWidth > 0 ? stage.clientWidth : window.innerWidth;
+    const cssH = stage && stage.clientHeight > 0 ? stage.clientHeight : window.innerHeight;
+    const deviceW = Math.max(1, Math.round(cssW * dpr));
+    const deviceH = Math.max(1, Math.round(cssH * dpr));
     renderer.resize(deviceW, deviceH, settings.density, dpr);
     applyFramingForCurrentViewport(true);
-    if (portraitHint) {
-      portraitHint.hidden = !(window.innerHeight > window.innerWidth * 1.15 && window.innerWidth < 700);
-    }
+    updateRotatePrompt();
   }
 
   function syncSettings(next: SettingsState): void {
@@ -461,8 +612,8 @@ async function boot(): Promise<void> {
     }
     if (prev.cameraPreset !== next.cameraPreset) {
       cameraPreset = next.cameraPreset;
-      userOrbited = false;
-      applyFramingForCurrentViewport(false);
+      orbitRig = presetRig(cameraPreset);
+      applyFramingForCurrentViewport(false, true);
     }
     if (prev.density !== next.density) {
       updateViewportSize();
@@ -498,6 +649,7 @@ async function boot(): Promise<void> {
       prevElapsedMs: 0,
       before: store.snapshot(),
     };
+    haptic(20);
     audio.playSweepWhoosh(SWEEP_DURATION_MS / 1000);
     stepGubbaInPlace(gubba, { type: "sweep" }, clockMs);
   }
@@ -544,10 +696,13 @@ async function boot(): Promise<void> {
       return;
     }
     placingKind = null;
+    touchPlacingPointerId = null;
     movingElement = null;
+    touchPreviewTag = null;
     if (settings.rake !== id) {
       syncSettings(setRake(settings, id));
     }
+    haptic(10);
     audio.playRakeClack();
     stepGubbaInPlace(gubba, { type: "rake_selected", rakeId: id }, clockMs);
   }
@@ -562,7 +717,7 @@ async function boot(): Promise<void> {
     const file = new File([blob], filename, { type: "image/png" });
     if (nav.canShare?.({ files: [file] }) && nav.share) {
       try {
-        await nav.share({ files: [file], title: "Rake Me" });
+        await nav.share({ files: [file], title: "Gubba's Porch" });
         return;
       } catch {
         // User cancelled share; fall through quietly.
@@ -588,6 +743,7 @@ async function boot(): Promise<void> {
   }
 
   function handleOverlayAction(action: OverlayAction): void {
+    if (action.type !== "none") haptic(8);
     switch (action.type) {
       case "none":
         return;
@@ -646,6 +802,7 @@ async function boot(): Promise<void> {
   }
 
   function handleUiCommand(cmd: UiCommand): void {
+    if (rotateBlocked) return;
     unlockAudioIfNeeded();
     switch (cmd.type) {
       case "select_rake":
@@ -740,11 +897,7 @@ async function boot(): Promise<void> {
         return;
       case "orbit": {
         if (raking) return;
-        userOrbited = true;
-        cameraGoal = clampOrbit(
-          { ...cameraGoal, az: cameraGoal.az + cmd.dir * 0.14 },
-          CAMERA_PRESETS[cameraPreset].dist,
-        );
+        orbitTo({ ...orbitRig, az: orbitRig.az + cmd.dir * 0.14 });
         return;
       }
       case "virtual_toggle": {
@@ -884,21 +1037,35 @@ async function boot(): Promise<void> {
     foleyStationarySilenced = true;
   }
 
+  canvas.addEventListener("contextmenu", (ev) => {
+    ev.preventDefault();
+  });
+
   canvas.addEventListener("click", () => {
+    if (rotateBlocked) return;
     unlockAudioIfNeeded();
   });
 
   canvas.addEventListener("pointerdown", (ev) => {
+    if (rotateBlocked) return;
     unlockAudioIfNeeded();
     if (ev.pointerType === "touch") {
+      // Touch browsers apply implicit pointer capture on pointerdown; track every finger so rotate can release it.
+      capturedPointers.add(ev.pointerId);
       activeTouches.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
       if (activeTouches.size === 2) {
         if (raking) finishStroke();
+        touchRakeHold = null;
+        touchPreviewTag = null;
+        hokiHoldStartMs = null;
+        hokiTouchHold = null;
+        movingElement = null;
+        touchPlacingPointerId = null;
         const pts = [...activeTouches.values()];
         pinchDist = Math.hypot(pts[1]!.x - pts[0]!.x, pts[1]!.y - pts[0]!.y);
         const cx = (pts[0]!.x + pts[1]!.x) * 0.5;
         const cy = (pts[0]!.y + pts[1]!.y) * 0.5;
-        orbitDrag = { pointerId: ev.pointerId, startX: cx, startY: cy, az: cameraGoal.az, el: cameraGoal.el };
+        orbitDrag = { pointerId: ev.pointerId, startX: cx, startY: cy, az: orbitRig.az, el: orbitRig.el, twoFinger: true };
         return;
       }
     }
@@ -911,6 +1078,7 @@ async function boot(): Promise<void> {
     // 1. Check pixel overlay (HUD / Settings / Basket tray) first
     const ovAction = renderer.overlayHit(fb.x, fb.y);
     if (ovAction !== null) {
+      touchPreviewTag = null;
       handleOverlayAction(ovAction);
       return;
     }
@@ -920,9 +1088,21 @@ async function boot(): Promise<void> {
       panel = "none";
     }
 
-    // 2. Active stone placement mode
+    // 2. Active stone placement mode (touch supports drag-to-aim and release-to-drop; mouse drops on click)
     if (placingKind !== null) {
       const sp = renderer.sandPoint(fb.x, fb.y);
+      if (ev.pointerType === "touch") {
+        if (isInsideBed(sp)) {
+          placingPos.x = Math.max(0, Math.min(191, Math.round(sp.x)));
+          placingPos.y = Math.max(0, Math.min(111, Math.round(sp.y)));
+          touchPlacingPointerId = ev.pointerId;
+          capturePointer(ev.pointerId);
+        } else {
+          placingKind = null;
+          touchPlacingPointerId = null;
+        }
+        return;
+      }
       if (isInsideBed(sp)) {
         const id = uniqueElementId(placingKind);
         const fp = ELEMENT_FOOTPRINTS[placingKind];
@@ -937,6 +1117,7 @@ async function boot(): Promise<void> {
         });
         if (ok) {
           sandReset = true;
+          haptic(15);
           audio.playStoneThud();
           stepGubbaInPlace(gubba, { type: "stone_placed" }, clockMs);
           scheduleSave();
@@ -951,19 +1132,36 @@ async function boot(): Promise<void> {
     if (picked.kind === "rake" && picked.id) {
       const rid = picked.id as RakeId;
       if (rid === "hoki") {
-        // DESIGN.md 3.7: Hōki requires a 0.8 s hold to sweep
+        // DESIGN.md 3.7: Hōki requires a 0.8 s hold to sweep; show its description immediately on touch
         hokiHoldStartMs = clockMs;
-        try {
-          canvas.setPointerCapture(ev.pointerId);
-        } catch {
-          // Synthetic event fallback
+        if (ev.pointerType === "touch") {
+          hokiTouchHold = { pointerId: ev.pointerId, startX: ev.clientX, startY: ev.clientY };
+          hoverRake = "hoki";
+          touchPreviewTag = { id: "hoki", untilMs: clockMs + TOUCH_PREVIEW_LINGER_MS };
+          mirror.say(HOVER_TAGS.hoki);
         }
+        capturePointer(ev.pointerId);
+      } else if (ev.pointerType === "touch") {
+        // Touch: quick tap selects the rake; holding >= 350 ms previews its description without switching
+        touchPreviewTag = null;
+        touchRakeHold = {
+          id: rid,
+          pointerId: ev.pointerId,
+          startMs: clockMs,
+          startEventTs: ev.timeStamp,
+          startX: ev.clientX,
+          startY: ev.clientY,
+          previewed: false,
+        };
+        capturePointer(ev.pointerId);
       } else {
         selectRakeTool(rid);
       }
       return;
     }
+    touchPreviewTag = null;
     if (picked.kind === "gubba") {
+      haptic(10);
       stepGubbaInPlace(gubba, { type: "gubba_tapped", activeRake: settings.rake }, clockMs);
       const updated = withHeardStories(settings, gubba.heardStories);
       if (updated !== settings) syncSettings(updated);
@@ -984,11 +1182,7 @@ async function boot(): Promise<void> {
           x: existing.x,
           y: existing.y,
         };
-        try {
-          canvas.setPointerCapture(ev.pointerId);
-        } catch {
-          // Synthetic event fallback
-        }
+        capturePointer(ev.pointerId);
         return;
       }
     }
@@ -1002,11 +1196,7 @@ async function boot(): Promise<void> {
       activePointerType = ev.pointerType === "touch" ? "touch" : ev.pointerType === "pen" ? "pen" : "mouse";
       raking = true;
       strokeStartedDuringSweep = sweepActive !== null;
-      try {
-        canvas.setPointerCapture(ev.pointerId);
-      } catch {
-        // Synthetic test events may not have an active pointer id
-      }
+      capturePointer(ev.pointerId);
       const rakeSpec = RAKE_BY_ID[settings.rake];
       const deflected = deflect(sp, store.garden.elements);
       rakeHeadBuf.x = deflected.x;
@@ -1035,17 +1225,14 @@ async function boot(): Promise<void> {
       pointerId: ev.pointerId,
       startX: ev.clientX,
       startY: ev.clientY,
-      az: cameraGoal.az,
-      el: cameraGoal.el,
+      az: orbitRig.az,
+      el: orbitRig.el,
     };
-    try {
-      canvas.setPointerCapture(ev.pointerId);
-    } catch {
-      // Synthetic event fallback
-    }
+    capturePointer(ev.pointerId);
   });
 
   canvas.addEventListener("pointermove", (ev) => {
+    if (rotateBlocked) return;
     if (ev.pointerType === "touch" && activeTouches.has(ev.pointerId)) {
       activeTouches.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
       if (activeTouches.size === 2 && orbitDrag) {
@@ -1053,18 +1240,14 @@ async function boot(): Promise<void> {
         const d = Math.hypot(pts[1]!.x - pts[0]!.x, pts[1]!.y - pts[0]!.y);
         const cx = (pts[0]!.x + pts[1]!.x) * 0.5;
         const cy = (pts[0]!.y + pts[1]!.y) * 0.5;
-        userOrbited = true;
-        const nextDist = pinchDist ? cameraGoal.dist * (pinchDist / Math.max(10, d)) : cameraGoal.dist;
+        const nextDist = pinchDist ? orbitRig.dist * (pinchDist / Math.max(10, d)) : orbitRig.dist;
         pinchDist = d;
-        cameraGoal = clampOrbit(
-          {
-            ...cameraGoal,
-            az: orbitDrag.az - (cx - orbitDrag.startX) * 0.005,
-            el: orbitDrag.el + (cy - orbitDrag.startY) * 0.005,
-            dist: nextDist,
-          },
-          CAMERA_PRESETS[cameraPreset].dist,
-        );
+        orbitTo({
+          ...orbitRig,
+          az: orbitDrag.az - (cx - orbitDrag.startX) * 0.005,
+          el: orbitDrag.el + (cy - orbitDrag.startY) * 0.005,
+          dist: nextDist,
+        });
         return;
       }
     }
@@ -1073,6 +1256,37 @@ async function boot(): Promise<void> {
     pointerFbBuf.x = fb.x;
     pointerFbBuf.y = fb.y;
     hasPointerFb = true;
+
+    // Cancel a pending Hōki touch sweep hold if the thumb slides off the broom
+    if (hokiTouchHold && ev.pointerId === hokiTouchHold.pointerId) {
+      if (Math.hypot(ev.clientX - hokiTouchHold.startX, ev.clientY - hokiTouchHold.startY) > TOUCH_HOLD_MOVE_SLOP_PX) {
+        hokiHoldStartMs = null;
+        hokiTouchHold = null;
+        if (hoverRake === "hoki") hoverRake = null;
+        if (touchPreviewTag?.id === "hoki") touchPreviewTag = null;
+      }
+      return;
+    }
+
+    // Cancel a pending touch rake hold if the thumb slides off the rake
+    if (touchRakeHold && ev.pointerId === touchRakeHold.pointerId) {
+      if (Math.hypot(ev.clientX - touchRakeHold.startX, ev.clientY - touchRakeHold.startY) > TOUCH_HOLD_MOVE_SLOP_PX) {
+        if (hoverRake === touchRakeHold.id) hoverRake = null;
+        if (touchPreviewTag?.id === touchRakeHold.id) touchPreviewTag = null;
+        touchRakeHold = null;
+      }
+      return;
+    }
+
+    // Touch drag-to-aim stone placement
+    if (touchPlacingPointerId === ev.pointerId && placingKind !== null) {
+      const sp = renderer.sandPoint(fb.x, fb.y);
+      if (sp) {
+        placingPos.x = Math.max(0, Math.min(191, Math.round(sp.x)));
+        placingPos.y = Math.max(0, Math.min(111, Math.round(sp.y)));
+      }
+      return;
+    }
 
     // Moving an existing placed element
     if (movingElement && ev.pointerId === movingElement.pointerId) {
@@ -1100,7 +1314,13 @@ async function boot(): Promise<void> {
         rakeHeadBuf.y = tel.head.y;
         rakeHeading = tel.heading;
         markDirty(tel.dirtyRect);
-        if (tel.hitStone) audio.playStoneThud();
+        if (tel.hitStone) {
+          audio.playStoneThud();
+          if (clockMs - lastStoneHapticMs >= HAPTIC_STONE_COOLDOWN_MS) {
+            lastStoneHapticMs = clockMs;
+            haptic(14);
+          }
+        }
         lastFoleyMoveMs = clockMs;
         lastFoleyScreenX = fb.x / Math.max(1, renderer.fbW);
         foleyStationarySilenced = false;
@@ -1111,15 +1331,11 @@ async function boot(): Promise<void> {
 
     // Active orbit drag
     if (orbitDrag && ev.pointerId === orbitDrag.pointerId) {
-      userOrbited = true;
-      cameraGoal = clampOrbit(
-        {
-          ...cameraGoal,
-          az: orbitDrag.az - (ev.clientX - orbitDrag.startX) * 0.006,
-          el: orbitDrag.el + (ev.clientY - orbitDrag.startY) * 0.006,
-        },
-        CAMERA_PRESETS[cameraPreset].dist,
-      );
+      orbitTo({
+        ...orbitRig,
+        az: orbitDrag.az - (ev.clientX - orbitDrag.startX) * 0.006,
+        el: orbitDrag.el + (ev.clientY - orbitDrag.startY) * 0.006,
+      });
       return;
     }
 
@@ -1175,10 +1391,68 @@ async function boot(): Promise<void> {
   });
 
   function onPointerUp(ev: PointerEvent): void {
+    releasePointer(ev.pointerId);
+    if (rotateBlocked) return;
     unlockAudioIfNeeded();
     activeTouches.delete(ev.pointerId);
-    if (activeTouches.size < 2) pinchDist = null;
-    hokiHoldStartMs = null;
+    if (activeTouches.size < 2) {
+      pinchDist = null;
+      // Stop two-finger pinch/orbit immediately when either finger lifts so the remaining finger never snaps the view
+      if (orbitDrag?.twoFinger) orbitDrag = null;
+    }
+    if (hokiHoldStartMs !== null) {
+      hokiHoldStartMs = null;
+      if (hokiTouchHold && ev.pointerId === hokiTouchHold.pointerId) hokiTouchHold = null;
+      if (ev.pointerType === "touch" && hoverRake === "hoki") hoverRake = null;
+    }
+
+    if (touchRakeHold && ev.pointerId === touchRakeHold.pointerId) {
+      const hold = touchRakeHold;
+      touchRakeHold = null;
+      const heldLong =
+        hold.previewed ||
+        clockMs - hold.startMs >= TOUCH_RAKE_HOLD_MS ||
+        ev.timeStamp - hold.startEventTs >= TOUCH_RAKE_HOLD_MS;
+      if (!heldLong) {
+        selectRakeTool(hold.id);
+      } else {
+        if (!hold.previewed) {
+          mirror.say(HOVER_TAGS[hold.id]);
+          haptic(12);
+        }
+        touchPreviewTag = { id: hold.id, untilMs: clockMs + TOUCH_PREVIEW_LINGER_MS };
+        if (hoverRake === hold.id) hoverRake = null;
+      }
+      return;
+    }
+
+    if (touchPlacingPointerId === ev.pointerId && placingKind !== null) {
+      const fb = renderer.clientToFramebuffer(ev.clientX, ev.clientY);
+      const sp = renderer.sandPoint(fb.x, fb.y);
+      if (isInsideBed(sp)) {
+        const id = uniqueElementId(placingKind);
+        const fp = ELEMENT_FOOTPRINTS[placingKind];
+        const ok = store.placeElement({
+          id,
+          kind: placingKind,
+          x: Math.round(sp.x),
+          y: Math.round(sp.y),
+          rx: fp.rx,
+          ry: fp.ry,
+          rotation: 0,
+        });
+        if (ok) {
+          sandReset = true;
+          haptic(15);
+          audio.playStoneThud();
+          stepGubbaInPlace(gubba, { type: "stone_placed" }, clockMs);
+          scheduleSave();
+        }
+      }
+      touchPlacingPointerId = null;
+      placingKind = null;
+      return;
+    }
 
     if (movingElement && ev.pointerId === movingElement.pointerId) {
       const fb = renderer.clientToFramebuffer(ev.clientX, ev.clientY);
@@ -1187,12 +1461,14 @@ async function boot(): Promise<void> {
       if (picked.kind === "basket" || !isInsideBed(sp)) {
         if (store.removeElement(movingElement.id)) {
           sandReset = true;
+          haptic(15);
           audio.playStoneThud();
           scheduleSave();
         }
       } else {
         if (store.moveElement(movingElement.id, Math.round(sp.x), Math.round(sp.y))) {
           sandReset = true;
+          haptic(15);
           audio.playStoneThud();
           scheduleSave();
         }
@@ -1209,9 +1485,28 @@ async function boot(): Promise<void> {
     }
   }
   function onPointerCancel(ev: PointerEvent): void {
+    releasePointer(ev.pointerId);
     activeTouches.delete(ev.pointerId);
-    if (activeTouches.size < 2) pinchDist = null;
+    if (activeTouches.size < 2) {
+      pinchDist = null;
+      if (orbitDrag?.twoFinger) orbitDrag = null;
+    }
     hokiHoldStartMs = null;
+    if (hokiTouchHold && ev.pointerId === hokiTouchHold.pointerId) {
+      hokiTouchHold = null;
+      if (hoverRake === "hoki") hoverRake = null;
+      if (touchPreviewTag?.id === "hoki") touchPreviewTag = null;
+    }
+    if (touchRakeHold && ev.pointerId === touchRakeHold.pointerId) {
+      if (hoverRake === touchRakeHold.id) hoverRake = null;
+      if (touchPreviewTag?.id === touchRakeHold.id) touchPreviewTag = null;
+      touchRakeHold = null;
+    }
+    if (touchPlacingPointerId === ev.pointerId) {
+      touchPlacingPointerId = null;
+      placingKind = null;
+    }
+    if (rotateBlocked) return;
     if (movingElement && ev.pointerId === movingElement.pointerId) {
       // Cancel stone drag without moving or deleting the stone
       movingElement = null;
@@ -1229,14 +1524,10 @@ async function boot(): Promise<void> {
   canvas.addEventListener(
     "wheel",
     (ev) => {
-      if (raking || panel !== "none") return;
+      if (rotateBlocked || raking || panel !== "none") return;
       ev.preventDefault();
-      userOrbited = true;
       const scale = ev.deltaY > 0 ? 1.06 : 0.94;
-      cameraGoal = clampOrbit(
-        { ...cameraGoal, dist: cameraGoal.dist * scale },
-        CAMERA_PRESETS[cameraPreset].dist,
-      );
+      orbitTo({ ...orbitRig, dist: orbitRig.dist * scale });
     },
     { passive: false },
   );
@@ -1360,7 +1651,22 @@ async function boot(): Promise<void> {
     // Hold `0` or Hōki for 0.8 s to trigger smooth-all sweep
     if (hokiHoldStartMs !== null && clockMs - hokiHoldStartMs >= HOKI_HOLD_MS) {
       hokiHoldStartMs = null;
+      hokiTouchHold = null;
+      if (hoverRake === "hoki") hoverRake = null;
+      touchPreviewTag = null;
       startSweep();
+    }
+
+    // Hold a hanging rake on touch for 350 ms to lift it and preview its description without switching
+    if (touchRakeHold !== null && !touchRakeHold.previewed && clockMs - touchRakeHold.startMs >= TOUCH_RAKE_HOLD_MS) {
+      touchRakeHold.previewed = true;
+      hoverRake = touchRakeHold.id;
+      touchPreviewTag = { id: touchRakeHold.id, untilMs: clockMs + TOUCH_PREVIEW_LINGER_MS };
+      mirror.say(HOVER_TAGS[touchRakeHold.id]);
+      haptic(12);
+    }
+    if (touchPreviewTag !== null && touchRakeHold === null && hokiHoldStartMs === null && clockMs >= touchPreviewTag.untilMs) {
+      touchPreviewTag = null;
     }
 
     // Decay stationary rake foley smoothly to silence when hand rests
@@ -1412,16 +1718,36 @@ async function boot(): Promise<void> {
     poseGubba(gubba, breathBuf.amplitude, clockMs, gubbaPoseOpts);
     mirror.mirrorSpeech(gubba.speech);
 
-    // Camera damping: frozen while actively raking so pointer->sand mapping never shifts mid-stroke
+    // Camera damping: frozen while actively raking so pointer->sand mapping never shifts mid-stroke.
+    // Within a preset, damp `orbitCurrent` and fit every intermediate step via `viewportRigInto` so hero objects
+    // never clip during an orbit drag; across preset switches, ease directly to the target preset's fitted rig.
     if (!raking) {
-      stepCameraInto(cameraRig, cameraRig, cameraGoal, reducedMotion, dtMs);
+      if (easingPreset) {
+        stepCameraInto(cameraRig, cameraRig, cameraGoal, reducedMotion, dtMs);
+        if (
+          cameraRig.az === cameraGoal.az &&
+          cameraRig.el === cameraGoal.el &&
+          cameraRig.dist === cameraGoal.dist &&
+          cameraRig.target.x === cameraGoal.target.x &&
+          cameraRig.target.y === cameraGoal.target.y &&
+          cameraRig.target.z === cameraGoal.target.z
+        ) {
+          copyRig(orbitCurrent, orbitRig);
+          easingPreset = false;
+        }
+      } else {
+        stepCameraInto(orbitCurrent, orbitCurrent, orbitRig, reducedMotion, dtMs);
+        viewportRigInto(cameraRig, orbitCurrent, cameraPreset, renderer.fbW, renderer.fbH, renderer.uiScale);
+      }
     }
 
-    // Build speech text (Gubba speech, or cached hovered rake name tag)
-    let speechText: string | null = gubba.speech?.text ?? null;
+    // Build speech text (active touch rake preview takes priority, then Gubba speech, then mouse hover tag)
+    let speechText: string | null =
+      touchPreviewTag !== null ? HOVER_TAGS[touchPreviewTag.id] : (gubba.speech?.text ?? null);
     if (speechText === null && hoverRake !== null) {
       speechText = HOVER_TAGS[hoverRake];
     }
+    lastSpeechText = speechText;
 
     // Fill reusable GardenFrame
     frame.timeMs = clockMs;
@@ -1507,8 +1833,9 @@ async function boot(): Promise<void> {
         elements: store.garden.elements.map((e) => ({ ...e })),
         panel,
         tab,
-        speech: gubba.speech?.text ?? null,
+        speech: lastSpeechText,
         watchGubbaRake,
+        rotateBlocked,
       }),
       stroke: (points, rakeId) => {
         if (points.length === 0) return sandHash(store.garden.sand);
@@ -1563,7 +1890,7 @@ async function boot(): Promise<void> {
       setCamera: (name) => {
         cameraPreset = name;
         settings = { ...settings, cameraPreset: name };
-        userOrbited = false;
+        orbitRig = presetRig(cameraPreset);
         applyFramingForCurrentViewport(true);
         flushSave();
         stepFrame(0);
@@ -1671,6 +1998,12 @@ async function boot(): Promise<void> {
       },
       pick: (fbX, fbY) => renderer.pick(fbX, fbY),
       sandPoint: (fbX, fbY) => renderer.sandPoint(fbX, fbY),
+      project: (x, y, z) => {
+        const p = projectPoint(cameraRig, { x, y, z }, renderer.fbW, renderer.fbH);
+        return p ? { x: p.x, y: p.y } : null;
+      },
+      pickBounds: () => renderer.pickBounds(),
+      speechRect: () => renderer.overlay.speechRect(),
       overlayHits: () => renderer.overlayHits(),
       fbSize: () => {
         const r = canvas.getBoundingClientRect();
@@ -1678,6 +2011,7 @@ async function boot(): Promise<void> {
           fbW: renderer.fbW,
           fbH: renderer.fbH,
           scale: renderer.scale,
+          uiScale: renderer.uiScale,
           cssW: Math.round(r.width),
           cssH: Math.round(r.height),
         };

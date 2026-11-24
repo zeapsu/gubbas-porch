@@ -440,15 +440,31 @@ void main() {
 }
 `;
 
-/** Pass 5, present: nearest-neighbour blit at integer scale k. */
+/**
+ * Pass 5, present: nearest-neighbour blit at integer scale k. When the overlay has a pixel size of its own
+ * (`uUi.x` device pixels, a narrow window) it is laid over the blit here, from the bottom-left corner, instead
+ * of in pass 4; it is still palette indices looked up in the same palette texture.
+ */
 export const PRESENT_FRAGMENT = /* glsl */ `
 precision highp float;
 precision highp sampler2D;
 uniform sampler2D tFinal;
+uniform sampler2D tOverlay;
+uniform sampler2D tPalette;
 uniform float uScale;
+// x: device pixels per overlay pixel (0 when pass 4 already drew the overlay), y: overlay width, z: overlay height
+uniform vec3 uUi;
 layout(location = 0) out vec4 outColor;
 void main() {
   ivec2 p = ivec2(floor(gl_FragCoord.xy / uScale));
-  outColor = vec4(texelFetch(tFinal, p, 0).rgb, 1.0);
+  vec3 col = texelFetch(tFinal, p, 0).rgb;
+  if (uUi.x > 0.5) {
+    ivec2 u = ivec2(floor(gl_FragCoord.xy / uUi.x));
+    if (u.x < int(uUi.y) && u.y < int(uUi.z)) {
+      int idx = int(texelFetch(tOverlay, ivec2(u.x, int(uUi.z) - 1 - u.y), 0).r * 255.0 + 0.5);
+      if (idx < 32) col = texelFetch(tPalette, ivec2(idx, 0), 0).rgb;
+    }
+  }
+  outColor = vec4(col, 1.0);
 }
 `;

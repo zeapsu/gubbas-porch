@@ -63,9 +63,9 @@ jobs:
       - name: Unit & property tests
         run: npm run test:unit
 
-      - name: Build (GitHub Pages BASE_PATH=/rake-me/)
+      - name: Build (GitHub Pages BASE_PATH=/gubbas-porch/)
         env:
-          BASE_PATH: /rake-me/
+          BASE_PATH: /gubbas-porch/
         run: npm run build
 
       - name: Check bundle budgets
@@ -98,8 +98,36 @@ jobs:
 
       - name: Run Playwright verification (software WebGL)
         env:
-          BASE_PATH: /rake-me/
-        run: npm run test:e2e
+          BASE_PATH: /gubbas-porch/
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/garden
+        run: npx playwright test tests/e2e/garden.spec.ts
+
+      # Eleven popular windows, from 1920x1080 down to phones: the whole garden and every control must stay on
+      # screen, and an upright phone must be asked to turn sideways (DESIGN.md 2.4, D8).
+      - name: Run popular-viewport responsiveness checks
+        if: success() || failure()
+        env:
+          BASE_PATH: /gubbas-porch/
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/viewports
+        run: npm run test:e2e:viewports
+
+      # Mobile & touch gestures: tap vs hold-to-preview rake descriptions, haptics, Hoki sweep hold,
+      # contextmenu suppression, 3-cell touch raking, 2-finger pinch/orbit, and touch stone placement.
+      - name: Run mobile & touch controls checks
+        if: success() || failure()
+        env:
+          BASE_PATH: /gubbas-porch/
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/touch
+        run: npm run test:e2e:touch
+
+      - name: Upload viewport screenshots
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: viewport-screenshots
+          path: test-results/viewport-*.png
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Upload Playwright report on failure
         if: failure()

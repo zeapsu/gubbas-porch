@@ -22,7 +22,7 @@ export type { FramebufferSize } from "./pipeline/pipeline.ts";
 export { GardenScene, MAX_ELEMENTS } from "./scene/gardenScene.ts";
 export type { GardenFrame } from "./scene/gardenScene.ts";
 export { RACK_ORDER, RACK_SLOTS, MODEL_SPECS } from "./scene/assets.ts";
-export { Overlay, PRESET_LABELS } from "./overlay/overlay.ts";
+export { Overlay, PRESET_LABELS, uiPixelFor } from "./overlay/overlay.ts";
 export type { OverlayAction, OverlayHit, OverlayState, SettingsPatch, SettingsTab, MixChannel } from "./overlay/overlay.ts";
 export type { HudId } from "./overlay/hud.ts";
 export { measureText, wrapText } from "./overlay/font.ts";
@@ -55,7 +55,7 @@ export class RakeRenderer {
   private constructor(pipeline: RenderPipeline, garden: GardenScene, failed: string[], standIns: string[]) {
     this.pipeline = pipeline;
     this.garden = garden;
-    this.overlay = new Overlay(pipeline.fbW, pipeline.fbH);
+    this.overlay = new Overlay(pipeline.fbW, pipeline.fbH, pipeline.scale, pipeline.density);
     this.failedModels = failed;
     this.standInModels = standIns;
     pipeline.setGarden(garden);
@@ -81,13 +81,19 @@ export class RakeRenderer {
     return this.pipeline.scale;
   }
 
+  /** Scene pixels per overlay pixel in the current window: 1 in a landscape window, more in a narrow one. */
+  get uiScale(): number {
+    return this.overlay.scale;
+  }
+
   get drawCalls(): number {
     return this.pipeline.drawCalls;
   }
 
   resize(deviceW: number, deviceH: number, density: PixelDensity, devicePixelRatio = 1): FramebufferSize {
     const size = this.pipeline.resize(deviceW, deviceH, density, devicePixelRatio);
-    this.overlay.resize(size.fbW, size.fbH);
+    this.overlay.resize(size.fbW, size.fbH, size.scale, density);
+    this.pipeline.setOverlayGrid(this.overlay.layer.w, this.overlay.layer.h, this.overlay.uiK);
     return size;
   }
 
@@ -114,6 +120,11 @@ export class RakeRenderer {
 
   sandPoint(fbX: number, fbY: number): Vec2 | null {
     return this.pipeline.sandPoint(fbX, fbY);
+  }
+
+  /** Framebuffer bounding boxes of the pickable things in the last frame (see `RenderPipeline.pickBounds`). */
+  pickBounds(): ReturnType<RenderPipeline["pickBounds"]> {
+    return this.pipeline.pickBounds();
   }
 
   /** Converts a client (CSS pixel) position on the canvas into framebuffer pixels. */

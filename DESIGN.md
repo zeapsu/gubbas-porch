@@ -1,4 +1,4 @@
-# Rake Me — Design
+# Gubba's Porch — Design
 
 A 3D 8-bit Zen garden for the browser. You rake real 3D sand, place a few stones, breathe, and listen. Gubba, a large and faintly ridiculous slug-toad, keeps the garden and mostly keeps quiet.
 
@@ -42,8 +42,8 @@ Five passes per frame. Passes 1–4 run at the low framebuffer resolution; only 
 | 1 | Shadow | 1024² depth, `BasicShadowMap` | One directional light, orthographic, fitted to a sphere of radius 215 around `(24, 10, 0)`. No filtering: shadow edges are hard |
 | 2 | Scene | Low-res `WebGLRenderTarget`, two colour attachments plus a depth texture, `NearestFilter`, no MSAA | Every mesh writes a **G-buffer**: ramp id, light term `N·L`, flags (emissive, no-outline, sand), and a part id. No colour is decided here |
 | 3 | Resolve | Low-res RGBA8 | A full-screen pass turns the G-buffer into palette colours: cel step, dither, shadow, outline (below) |
-| 4 | Overlay | Same target | HUD objects, the speech scroll, and the bitmap font, drawn orthographically so UI pixels are the same size as scene pixels |
-| 5 | Present | Canvas | One nearest-neighbour blit at an integer scale |
+| 4 | Overlay | Same target | HUD objects, the speech scroll, and the bitmap font, drawn orthographically so UI pixels are the same size as scene pixels. Skipped in a window where the overlay has larger pixels than the scene (2.7) |
+| 5 | Present | Canvas | One nearest-neighbour blit at an integer scale. In a window where the overlay has its own pixel size, the same pass lays it over the blit from the bottom-left corner, each overlay pixel a whole number of device pixels in one of the 32 palette colours |
 
 **Resolve, per pixel.** `n` is the length of the material's ramp, `b` is the Bayer value for the pixel, `amb` is the mood's ambient term.
 
@@ -65,16 +65,19 @@ slot = ramp[tone]                              // one of the 32 palette slots
 The framebuffer is not a fixed size. It is the window divided by an integer pixel scale `k`, so every scene pixel is exactly `k × k` device pixels and wide windows simply see more porch.
 
 ```
-k           = max(1, round(devicePixelHeight / targetRows))
-framebuffer = ceil(deviceWidth / k) × ceil(deviceHeight / k)
+k           = max(1, round(min(devicePixelHeight / targetRows, devicePixelWidth / targetCols)))
+framebuffer = floor(deviceWidth / k) × floor(deviceHeight / k)
 ```
 
-| Density | `targetRows` | At a 1456×820 device window | Character |
-|---|---|---|---|
-| **Crisp** (default) | 205 | 364×205, k = 4 | Grooves read clearly from the default camera; tines are countable |
-| **Chunky** | 137 | 243×137, k = 6 | Bolder and more abstract; fine grooves merge into dithered texture at a distance |
+| Density | `targetRows` | `targetCols` | At a 1456×820 device window | Character |
+|---|---|---|---|---|
+| **Crisp** (default) | 205 | 364 | 364×205, k = 4 | Grooves read clearly from the default camera; tines are countable |
+| **Chunky** | 137 | 243 | 242×136, k = 6 | Bolder and more abstract; fine grooves merge into dithered texture at a distance |
 
 The toggle lives in the menu scroll. Both use the same scene, shaders, and palette.
+
+- **Height or width, whichever binds.** `targetCols` is the reference window's width at each density. A landscape window is bound by its height, so 16:9 and wider windows are sized exactly as the reference is. A window narrower than the reference shape (a tablet held upright, a split-screen desktop) is bound by its width instead: the camera has to pull back to fit the garden's width there (2.4), and tying `k` to the height would leave the bed a few dozen very large pixels wide. A 768×1024 window renders 384×512 at k = 2, not 153×204 at k = 5, so the garden keeps the same pixels across it as on a desktop.
+- **Round down, never crop.** The canvas is exactly `framebuffer · k` device pixels, which is never more than the window. What is left over, at most `k − 1` device pixels per axis, shows the page's ink background (`#2a1d1a`) as a hairline border. Rounding up instead would push part of the outermost scene pixels off screen. The canvas is centred on a whole device pixel so no row or column is drawn wider than its neighbours.
 
 ### 2.3 World layout
 
@@ -107,10 +110,19 @@ A perspective camera with a narrow 26° vertical field of view, which keeps the 
 `C` steps through the presets; the menu scroll lists them by name.
 
 - **Damping.** Azimuth, elevation, distance, and target each move toward their goal by a factor of 0.12 per 60 Hz frame (a time constant of about 130 ms). There are no cuts and no overshoot. With reduced motion, preset changes are instant.
-- **Orbit.** Dragging on anything that is not sand, a rake, Gubba, or the basket orbits: azimuth within ±0.7 rad, elevation within 0.25–1.555 rad. Two-finger drag orbits on touch. The wheel or a pinch scales distance between 0.7× and 1.3× of the preset.
+- **Orbit.** Dragging on anything that is not sand, a rake, Gubba, or the basket orbits: azimuth within ±0.7 rad, elevation within 0.25–1.555 rad. Two-finger drag orbits on touch. The wheel or a pinch scales distance between 0.7× and 1.3× of the distance the preset is framed at in this window (below), so a narrow window that had to pull back is never snapped inward by a wheel tick. The view is re-framed as it orbits, so at 1× zoom the garden never slides off screen.
 - **Raking never moves the camera.** A stroke captures the pointer; orbit and zoom are ignored until it ends.
-- **Framing check.** On resize, distance is increased if needed so the bed's four corners stay inside the view with an 8-pixel margin.
-- **Portrait windows.** The same rule applies: the camera pulls back until the bed fits. Decision D8 covers turning the layout instead.
+- **Framing.** Each preset names what it must keep on screen, as world-space hulls a little larger than the models:
+
+  | Preset | Kept inside the view | Kept clear of the HUD |
+  |---|---|---|
+  | Cozy 3/4 | The bed and its frame, all ten rakes on the wall, Gubba (all three variants), the stone basket, the shishi-odoshi, the shelf bonsai | — |
+  | Top-Down Raking | The bed and its frame | The sand's front-left corner |
+  | Gubba Porch | Gubba (all three variants) | Gubba |
+
+  On every resize, preset change and orbit step the camera is fitted to those hulls with a 6-pixel margin. Azimuth and elevation never change. The distance is the smallest one, not below the preset's, at which everything fits; the target then moves within the screen plane (a pan, never a turn) by the least that fits it, which on a narrow window centres the garden instead of pulling back further for Gubba's side alone. A view that already fits is left exactly as the preset: the 16:9 reference windows (1456×820, 1920×1080, 1366×768, 1280×720, phones on their side) show Cozy and Porch unchanged. "Clear of the HUD" means wholly to the right of the 3×2 HUD block or wholly above it, whichever needs the smaller camera move; the block is measured at the size the overlay draws it in this window (2.7). Cozy has no such rule because its reference view already rests the lotus on the bed's front-left frame corner, and narrower windows only lift the bed further from the HUD.
+- **Far plane.** `far` is 4800 and the camera never backs off beyond 4200, so the garden still fits a window five times taller than wide without the deck meeting the far plane.
+- **Upright phones.** A window narrower than 600 CSS pixels and more than 1.15 times taller than wide is a phone held upright. The garden is a wide scene, about 300 units of bed, rack and Gubba side by side, so there it would fill under a third of the screen with rakes and HUD objects too small to tap. A page cannot turn the screen itself: orientation lock needs fullscreen and iOS Safari has none. So that window shows a parchment prompt asking the player to turn the screen sideways (or widen the window), in the title card's style with inline pixel art and no external assets. It is a modal dialog: the garden behind it is inert and takes no pointer or key input, it never unlocks audio, and it leaves on its own as soon as the window is wide again. Its one animation, a two-frame nudge of the arrow, stops under `prefers-reduced-motion`. Tablets held upright (768×1024) and narrow desktop windows (640×720) are not phones and play as they are. Decision D8.
 
 ### 2.5 Pixel rules
 
@@ -192,10 +204,32 @@ Measured: ink on paper is 11.6:1 to 15.9:1 in every mood. Mood selection default
 
 ### 2.7 Overlay and typography
 
-The overlay is 2D, drawn into the low-res target after the resolve pass.
+The overlay is 2D: palette indices on a canvas of its own, composited after the resolve pass.
 
+- **Sized for the window.** The scene's pixel scale `k` follows whichever side of the window binds (2.2), so in a window narrower than the reference shape scene pixels are small against the window. A HUD drawn one scene pixel per pixel there would be half its desktop size beside a mostly empty deck: 32 CSS pixels at 768×1024 against 64 at 1456×820. The overlay therefore has its own pixel size `uiK`, in whole device pixels:
+
+  ```
+  start = round(min(canvasWidth, canvasHeight) / targetRows)       // the rule a landscape window's scene uses
+  uiK   = the largest value from start down to ⌈1.25 · k⌉ whose canvas, floor(canvas / uiK), keeps the speech
+          scroll 172 pixels wide and fits every Settings tab and the basket tray above the HUD; otherwise k
+  ```
+
+  It is never finer than the scene, and a step under a quarter is not taken (9 device pixels over the scene's 8 in a 16:10 window would move the two onto different grids for an eighth more size). In every landscape window, 16:9, 16:10, ultrawide and phones on their side, `uiK = k`: the overlay shares the scene's pixels and is drawn in pass 4 exactly as the reference is. Where `uiK > k` it is laid over the present blit in pass 5, anchored to the canvas's bottom-left corner.
+
+  | Window (device pixel ratio 1, Crisp) | Scene `k` | Overlay `uiK` | HUD object, CSS pixels | Share of the shorter side |
+  |---|---|---|---|---|
+  | 1456×820 | 4 | 4 | 64 | 7.8 % |
+  | 1440×900 | 4 | 4 | 64 | 7.1 % |
+  | 844×390 | 2 | 2 | 32 | 8.2 % |
+  | 1024×768 | 3 | 4 | 64 | 8.3 % |
+  | 768×1024 | 2 | 4 | 64 | 8.3 % |
+  | 1024×1366 | 3 | 5 | 80 | 7.8 % |
+  | 640×720 | 2 | 3 | 48 | 7.5 % |
+
+  Across the popular windows, both densities and device pixel ratios 1–3, a HUD object is 6–14 % of the window's shorter side. Hit rectangles and the HUD clearance the camera uses (2.4) are in framebuffer pixels at the drawn size, so they may be fractional when `uiK` is not a multiple of `k`. Low-res readbacks (`frameHash`, `exportPng` with `includeOverlay=true`) hold the overlay only where it shares the scene's pixels; `paletteViolations()` renders pass 5 at full canvas backing size so every presented pixel (including any independently scaled overlay) is checked against the 32-colour palette.
 - **HUD:** six 16×16 objects in a 3×2 block at the bottom left: undo, redo, breath lotus, mood lantern, sound bell, menu scroll. They are pixel art defined as data in code, not image files.
-- **Speech scroll:** up to 172 pixels wide beside the HUD, shown only while there is text. It never covers the bed in the Cozy camera except its front edge.
+- **Speech scroll:** up to 172 pixels wide, shown only while there is text. It sits beside the HUD where 172 pixels fit there, or at least 100 on a canvas less than 1.1 times taller than wide; otherwise it sits above the HUD at full width, which is where a tablet held upright has empty deck. It never covers the bed in the Cozy camera except its front edge.
+- **Panels:** the menu scroll (Settings) and the stone basket tray hang from the top-left and stop above the HUD block, so a panel control never overlaps a HUD object. Rows wrap to the panel's width; a panel too narrow for a label beside its chips or mix pips puts them underneath. Every hit rectangle is cut to the framebuffer.
 - **Font:** an original bitmap font defined in code (the one in the mockup). Cap height 7, x-height 5, glyphs 4 wide (5 for m and w, 1 to 3 for narrow letters), two descender rows, line pitch 9. No italics, no all-caps body text. Text is always `ink` on `paper`. A line of dialogue is at most 96 characters and wraps to at most 3 lines of 158 pixels.
 - Every string drawn on canvas is mirrored in a DOM `aria-live="polite"` region.
 
@@ -350,7 +384,7 @@ Presets are **stroke programs** (elements plus a list of `{rake, points}`), repl
 - `localStorage["rake-me:garden:v1"]`: `{ v: 1, elements, sand }`, where `sand` is `height` then `dir`, byte run-length encoded, then base64. Budget 64 KB.
 - `localStorage["rake-me:settings:v1"]`: rake, mood or `auto`, camera preset, pixel density, breath pattern, Gubba talk mode, mix levels, mute, rain, flow, heard stories.
 - Saved 1 s after each action and on `visibilitychange`. An unknown version or corrupt payload loads a fresh garden and never throws.
-- **Export PNG:** the resolved low-res frame is read back and scaled by an integer (4×, 6×, 8×, or 12×) with nearest-neighbour, from the current camera or from Top-Down, with or without the overlay. Downloaded as `rake-me-YYYYMMDD-HHmm.png`; the Web Share API is used on mobile when available.
+- **Export PNG:** the resolved low-res frame is read back and scaled by an integer (4×, 6×, 8×, or 12×) with nearest-neighbour, omitting the HUD overlay for player downloads (`includeOverlay=true` is supported for low-res frames when the overlay shares the scene grid). Downloaded as `gubbas-porch-YYYYMMDD-HHmm.png`; the Web Share API is used on mobile when available.
 
 ---
 
@@ -742,7 +776,7 @@ At load, static props are merged into a few geometries so the scene pass stays u
 - Dev dependencies: Vitest, fast-check, Playwright, ESLint with typescript-eslint.
 - Node 22 or later, npm.
 - WebGL2 is required for the two-attachment G-buffer. Without it the page shows one static pixel card ("this garden needs WebGL2") and nothing else.
-- Static output in `dist/`. `base` comes from `BASE_PATH` (default `/rake-me/`), and every asset URL goes through `import.meta.env.BASE_URL`, so the same build works on GitHub Pages and at a domain root.
+- Static output in `dist/`. `base` comes from `BASE_PATH` (default `/gubbas-porch/`), and every asset URL goes through `import.meta.env.BASE_URL`, so the same build works on GitHub Pages and at a domain root.
 - No analytics, no web fonts, no network requests after the initial load.
 
 **Budgets:** JavaScript ≤ 300 KB gzipped (Three.js is most of it; the figure is checked, not assumed); models ≤ 450 KB; total first load ≤ 900 KB; CPU per frame ≤ 4 ms on a mid-range laptop; ≤ 60 draw calls; no allocation in per-frame paths.
@@ -839,7 +873,7 @@ interface Pipeline {
 
 ### 9.5 Test hooks
 
-With `?test=1`, or in a dev build, `window.__rakeMe` exposes `sandHash()`, `state()`, `stroke(points, rakeId)`, `advance(ms)` (the clock is injected and frozen), `setMood(id)`, `setCamera(name)` (instant), `setDensity(name)`, `pick(x, y)`, `frameHash()`, `paletteViolations()`, and `audio.{state, masterGain}`. In test mode the RNG is seeded and particles are off.
+With `?test=1`, or in a dev build, `window.__rakeMe` exposes `sandHash()`, `state()`, `stroke(points, rakeId)`, `advance(ms)` (the clock is injected and frozen), `setMood(id)`, `setCamera(name)` (instant), `setDensity(name)`, `pick(x, y)`, `pickBounds()` (framebuffer bounding boxes of Gubba, the basket, each hanging rake and each placed element), `project(x, y, z)` (a world point in framebuffer pixels), `speechRect()`, `overlayHits()` (both in framebuffer pixels), `fbSize()` (with `scale`, device pixels per scene pixel, and `uiScale`, scene pixels per overlay pixel), `frameHash()`, `paletteViolations()`, and `audio.{state, masterGain}`. In test mode the RNG is seeded and particles are off.
 
 ---
 
@@ -854,7 +888,7 @@ With `?test=1`, or in a dev build, `window.__rakeMe` exposes `sandHash()`, `stat
 | Types | `npm run typecheck` | `tsc --noEmit` with `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes` |
 | Lint | `npm run lint` | Zero warnings; import rules from 9.3 hold |
 | Assets | `npm run verify:assets` | All seven checks in 8.5 |
-| Build | `npm run build` | Succeeds with `BASE_PATH=/rake-me/` and with `BASE_PATH=/` |
+| Build | `npm run build` | Succeeds with `BASE_PATH=/gubbas-porch/` and with `BASE_PATH=/` |
 | Bundle | `npm run check:bundle` | Budgets in 9.1; `three` is the only entry in `dependencies` |
 
 ### 10.2 Unit and property tests (Vitest, fast-check)
@@ -871,7 +905,13 @@ With `?test=1`, or in a dev build, `window.__rakeMe` exposes `sandHash()`, `stat
 | Flow | Zero displacement at and beyond 3R; with no stones, flow on and off give identical grids |
 | Cel step | `toneFor` is in `0 … n−1`, non-decreasing in intensity for a fixed Bayer value, and equal to the value the generated GLSL constants produce for a table of inputs |
 | Ramps | Every ramp's slots exist; multi-slot ramps are non-decreasing in luminance in all four moods |
-| Camera | `stepCamera` converges to the goal without overshoot; all presets are within the orbit limits; in Cozy and Top-Down the bed's four corners project inside a 364×205 view (and in all three after `framedRig`) |
+| Camera | `stepCamera` converges to the goal without overshoot; all presets are within the orbit limits; in Cozy and Top-Down the bed's four corners project inside a 364×205 view |
+| Framing | In every popular window (1920×1080 down to 568×320, both densities, device pixel ratios 1–3) each preset's hulls project inside the view with the 6-pixel margin and its HUD rule holds; the 16:9 reference views equal the presets exactly; a view that pulled back touches the margin on two opposite sides; any orbit angle and window shape stays framed and zoom scales the framed distance; the camera never passes the far-plane guard |
+| Model and framing agree | Every vertex of every committed hero model, placed as the scene places it, lies inside its framing hull |
+| Pixel scale | `k` is an integer ≥ 1 from the height or the width, whichever binds; the canvas never exceeds the window and the leftover border is under one scene pixel; every playable popular window gets at least 180 columns and 110 rows |
+| Overlay bounds | In every playable popular window the six HUD objects, the speech scroll, every control of all four Settings tabs and all eleven basket items are present, inside the framebuffer, and clear of the HUD block; at any size down to 1×1 no hit rectangle leaves the framebuffer |
+| Overlay size | `uiPixelFor` returns the scene's `k` in every landscape reference window and 4, 3, 4, 5 at 768×1024, 640×720, 1024×768, 1024×1366; for any window it is a whole number, never below `k`, and a larger value keeps the 172-pixel scroll; a HUD object is 6–14 % of the shorter side in every playable popular window; a scaled overlay lays out and draws exactly as a canvas of its own size, with hit rectangles and `hitTest` in framebuffer pixels; the HUD clearance the camera uses equals the HUD block as drawn |
+| Viewport rule | Only windows narrower than 600 px and more than 1.15× taller than wide ask to be turned sideways |
 | Undo | For any action sequence, `undo` restores the previous grid byte-for-byte and `redo` reapplies it; the stack never exceeds 32 |
 | Sweep | The front is monotonic in time; cells ahead of it are untouched; at the end every non-rock cell is level and unraked |
 | Serialisation | `decode(encode(s))` equals `s` for arbitrary states; output is at most 64 KB; random and truncated input never throws and yields a fresh garden |
@@ -887,7 +927,7 @@ With `?test=1`, or in a dev build, `window.__rakeMe` exposes `sandHash()`, `stat
 
 | Test | Asserts |
 |---|---|
-| Smoke | Loads under `/rake-me/`; a WebGL2 context exists; no console errors, shader compile errors, or failed requests; all 28 models load |
+| Smoke | Loads under `/gubbas-porch/`; a WebGL2 context exists; no console errors, shader compile errors, or failed requests; all 28 models load |
 | Pixel rules | `paletteViolations()` is 0 in every mood, camera preset, and density: every pixel of the resolved frame is one of the 32 palette colours. The canvas CSS size is an exact integer multiple of the framebuffer in device pixels |
 | Rake | A scripted drag over the bed changes `sandHash()`; a 300-cell jump in one move event leaves no gap; the same drag in Cozy and in Top-Down, aimed at the same grid points, gives the same hash |
 | Camera | Raking never changes the camera; dragging on the deck does; each preset key reaches its target |
@@ -900,11 +940,12 @@ With `?test=1`, or in a dev build, `window.__rakeMe` exposes `sandHash()`, `stat
 | Export | The download is a PNG whose size is the framebuffer times the chosen scale |
 | Accessibility | Every control has a labelled DOM twin; Gubba's line appears in the live region; with reduced motion emulated, the particle count is 0 and preset changes are instant |
 | Performance (soft) | 300 frames of scripted fast raking average under 8 ms per frame; draw calls are at most 60 |
+| Viewports (`tests/e2e/viewports.spec.ts`) | At 1920×1080, 1440×900, 1366×768, 1280×720, 1024×768, 768×1024, 640×720, 844×390 and 667×375: no errors, `paletteViolations()` is 0, the canvas is a whole multiple of the framebuffer inside the window; in Cozy, Gubba (each variant), the basket and every hanging rake are rendered, pickable, and touch no framebuffer edge, the bed's corners are inside the margin and its centre rakes under a real pointer; in Gubba Porch, Gubba touches no edge; in Top-Down the bed's corners are inside and its front-left corner is not under the HUD; in Crisp and Chunky the HUD, speech scroll, all four Settings tabs and the basket tray are complete, inside the framebuffer and clear of the HUD, each HUD object is square and 6–14 % of the window's shorter side, the overlay's pixel is a whole number of device pixels, a real click on the menu object opens the menu scroll, and with the clock held the screenshot changes when the scroll opens and is identical when it opens again. At 390×844 and 360×800: the turn-sideways dialog is shown inside the window in paper and ink, the garden behind it takes no pointer or key input and stays palette-clean, and turned to 844×390 or 800×360 the dialog leaves and the whole list above passes |
 
 ### 10.4 CI and deploy
 
-- `ci.yml` on pull requests and pushes: `npm ci`, then the `verify` steps in order, then Playwright with software WebGL.
-- `deploy.yml` on pushes to `main`, after CI: build with `BASE_PATH=/rake-me/`, `actions/upload-pages-artifact`, `actions/deploy-pages`.
+- `ci.yml` on pull requests and pushes: `npm ci`, then the `verify` steps in order, then Playwright with software WebGL in two named steps: the core suite (`tests/e2e/garden.spec.ts`) and the popular-viewport responsiveness checks (`npm run test:e2e:viewports`), whose screenshots are uploaded as an artifact. `npm run test:e2e`, and so `npm run verify`, runs both.
+- `deploy.yml` on pushes to `main`, after CI: build with `BASE_PATH=/gubbas-porch/`, `actions/upload-pages-artifact`, `actions/deploy-pages`.
 
 ---
 
@@ -934,11 +975,11 @@ All decisions confirmed by the user on 2026-11-24:
 | D1 | **Gubba's appearance** | **All three variants (A Moss Yabba, B Kasa Yabba, C Lantern Yabba) built in Blender and swappable live in the Settings tab** (default: A Moss Yabba). |
 | D2 | **Homage line** | Lounging-slug silhouette homage only (no name, colouring, slit eyes, hookah, or film lines). |
 | D3 | **Moods** | **Auto-follow local clock OR manual swap in the Settings tab** (and HUD mood lantern); Warm Cedar Afternoon tuned first. |
-| D4 | **Hosting** | **GitHub Pages** at `https://zeapsu.github.io/rake-me/` from a new public `zeapsu/rake-me` repo on `main`. |
+| D4 | **Hosting** | **GitHub Pages** at `https://zeapsu.github.io/gubbas-porch/` from the public `zeapsu/gubbas-porch` repo on `main` (renamed from `zeapsu/rake-me` on 2026-11-24). |
 | D5 | **Rake roster and access** | All 10 tools + stone basket available from the start; story seals are the only collectible. |
 | D6 | **Pixel density** | **Crisp** (~205 rows) by default, with **Chunky** (~137 rows) toggle in Settings. |
 | D7 | **Camera** | **Cozy 3/4** by default, with Top-Down and Gubba Porch presets + limited free orbit. |
-| D8 | **Portrait phones** | Pull camera back until the bed fits + subtle landscape hint. |
+| D8 | **Portrait phones** | **Landscape only on upright phones**: a window narrower than 600 px and more than 1.15× taller than wide shows a parchment "turn sideways" dialog and the garden waits behind it (2.4). Revised 2026-11-24 from "pull the camera back until the bed fits + subtle landscape hint", which left Gubba and the rakes off screen or a few pixels wide. Every other window, tablets held upright included, frames the whole garden. |
 | D9 | **Flow and deflection round stones** | Both on by default; Flow toggleable in Settings. |
 | D10–D12 | **Audio, Gubba talk, Breath guide** | Title card unlocks audio (8 s fade-in, continues in background tab); Gubba "Now and then" (≤ 1 line / 90 s); Breath guide off at first load (4-4-6). |
 | D13 | **Three.js and WebGL2** | **Three.js** (sole runtime dependency) + WebGL2, matching the visual fidelity of the 3D 8-bit mockups (`paletteViolations() === 0`). |

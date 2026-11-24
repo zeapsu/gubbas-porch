@@ -1,5 +1,5 @@
 {
-  "name": "rake-me",
+  "name": "gubbas-porch",
   "version": "1.0.0",
   "private": true,
   "type": "module",
@@ -18,8 +18,10 @@
     "check:bundle": "tsx scripts/check-bundle.ts",
     "test:unit": "vitest run",
     "test:e2e": "playwright test",
+    "test:e2e:viewports": "playwright test tests/e2e/viewports.spec.ts",
+    "test:e2e:touch": "playwright test tests/e2e/touch.spec.ts",
     "review:gate": "node .github/scripts/review-gate.mjs",
-    "verify": "npm run review:gate && npm run typecheck && npm run lint && npm run verify:assets && npm run test:unit && BASE_PATH=/rake-me/ npm run build && npm run check:bundle && BASE_PATH=/ npm run build && npm run test:e2e"
+    "verify": "npm run review:gate && npm run typecheck && npm run lint && npm run verify:assets && npm run test:unit && BASE_PATH=/gubbas-porch/ npm run build && npm run check:bundle && BASE_PATH=/ npm run build && npm run test:e2e"
   },
   "dependencies": {
     "three": "^0.175.0"

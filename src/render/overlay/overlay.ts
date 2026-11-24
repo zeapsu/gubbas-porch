@@ -1,7 +1,8 @@
-// Pass 4 content (DESIGN.md 2.7): the HUD, the speech scroll, and the quiet menu scroll (Settings) and stone
-// basket tray, drawn as palette indices into a framebuffer-sized buffer so overlay pixels are scene-sized and
-// every one of them is one of the mood's 32 colours. `draw` returns hit rectangles; the UI maps clicks to
-// `OverlayAction`s with `hitTest` and applies them. Text is always ink on paper.
+// Overlay content (DESIGN.md 2.7): the HUD, the speech scroll, and the quiet menu scroll (Settings) and stone
+// basket tray, drawn as palette indices so every overlay pixel is one of the mood's 32 colours. The canvas has
+// its own whole-number pixel size (`uiPixelFor`): the scene's in a landscape window, larger in a narrow one, so
+// the controls keep their size against the window. `draw` returns hit rectangles in framebuffer pixels; the UI
+// maps clicks to `OverlayAction`s with `hitTest` and applies them. Text is always ink on paper.
 
 import { CAMERA_PRESET_LABELS, CAMERA_PRESET_ORDER } from "../camera/rig.ts";
 import { ELEMENT_FOOTPRINTS } from "../../state/types.ts";
@@ -16,8 +17,20 @@ import type {
   SettingsState,
   TalkMode,
 } from "../../state/types.ts";
+import { TARGET_ROWS } from "../pipeline/tone.ts";
 import { PixelLayer, drawText, measureText } from "./font.ts";
-import { HUD_FROM_BOTTOM, HUD_ICON, HUD_LEFT, HUD_ORDER, S, drawPanel, drawScroll, makeHudIcons } from "./hud.ts";
+import {
+  HUD_FROM_BOTTOM,
+  HUD_ICON,
+  HUD_LEFT,
+  HUD_ORDER,
+  S,
+  SCROLL_MAX_W,
+  drawPanel,
+  drawScroll,
+  makeHudIcons,
+  scrollRect,
+} from "./hud.ts";
 import type { HudIcons, HudId } from "./hud.ts";
 
 export type SettingsTab = "look" | "garden" | "sound" | "presets";
@@ -229,9 +242,90 @@ const PAD = 5;
 const LABEL_W = 34;
 const CHIP_GAP = 3;
 const ROW_H = 11;
+/** Width of the eight pips of a mix row. */
+const MIX_PIPS_W = 8 * 7;
+/** Content narrower than this puts a row's chips under its label instead of beside it. */
+const STACK_BELOW = LABEL_W + 28;
+
+/** Panel width on an overlay canvas `w` pixels wide. */
+function panelWidthFor(w: number): number {
+  return Math.min(w, Math.max(60, Math.min(w - 6, 236)));
+}
+
+/** Tallest a panel may be on a canvas `h` pixels tall: it hangs from y = 3 and stops above the HUD block. */
+function panelMaxHeight(h: number): number {
+  return Math.max(Math.min(40, h - 3), h - HUD_FROM_BOTTOM - 2 - 3);
+}
+
+function panelHeightFor(contentRows: number, titled: boolean): number {
+  return PAD * 2 + 4 + (titled ? ROW_H + 2 : 0) + contentRows * ROW_H;
+}
+
+/** Rows a Settings tab needs (its tab strip included) when the panel's content is `cw` pixels wide. */
+function settingsRows(tab: SettingsTab, cw: number): number {
+  const stacked = cw < STACK_BELOW;
+  const mixStacked = cw < LABEL_W + MIX_PIPS_W;
+  const chipMaxW = stacked ? cw : cw - LABEL_W;
+  const extra = stacked ? 1 : 0;
+  const tabRows = wrapCount(TABS, Math.max(24, cw - 12));
+  const rows =
+    tab === "look"
+      ? extra * 4 + wrapCount(VARIANTS, chipMaxW) + wrapCount(MOODS, chipMaxW) + wrapCount(CAMERA_ROW, chipMaxW) + wrapCount(DENSITIES, chipMaxW)
+      : tab === "garden"
+        ? 3 * (stacked ? 2 : 1) + extra * 2 + wrapCount(PATTERNS, chipMaxW) + wrapCount(TALK, chipMaxW)
+        : tab === "sound"
+          ? MIX.length * (mixStacked ? 2 : 1) + 1 + extra
+          : extra * 3 + wrapCount(PRESET_LABEL_ITEMS, chipMaxW) + wrapCount(WATCH_OPTIONS, chipMaxW) + 1;
+  return rows + tabRows;
+}
+
+/** Smallest overlay-to-scene pixel ratio worth a separate grid, as a fraction: 5/4. */
+const UI_STEP_NUM = 5;
+const UI_STEP_DEN = 4;
+
+/**
+ * Device pixels per overlay pixel for a canvas of fbW · k × fbH · k device pixels (DESIGN.md 2.7).
+ *
+ * The scene's pixel scale `k` follows whichever side of the window binds (2.2), so in a window narrower than the
+ * reference shape scene pixels are small against the window, and a HUD drawn one-to-one would be about half the
+ * size it is on a desktop, beside a deck that is mostly empty. The overlay therefore takes its pixel size from the
+ * window's shorter side, the same `targetRows` rule a landscape window's scene uses, and steps down from there
+ * until nothing is lost: the speech scroll keeps its full 172 pixels and every Settings tab and the basket tray
+ * fit above the HUD. It is never finer than the scene, and it only leaves the scene's pixels for a step of at
+ * least a quarter (`UI_STEP_NUM / UI_STEP_DEN`): 9 device pixels over the scene's 8 in a 16:10 window would change the size by
+ * an eighth and put the two on different grids for nothing. In a landscape window the overlay therefore shares
+ * the scene's pixels exactly as the reference does.
+ */
+export function uiPixelFor(fbW: number, fbH: number, k: number, density: PixelDensity): number {
+  const cw = fbW * k;
+  const ch = fbH * k;
+  const start = Math.round(Math.min(cw, ch) / TARGET_ROWS[density]);
+  for (let ku = start; ku * UI_STEP_DEN >= k * UI_STEP_NUM; ku--) {
+    const w = Math.floor(cw / ku);
+    const h = Math.floor(ch / ku);
+    if (scrollRect(w, h).w < SCROLL_MAX_W) continue;
+    const content = panelWidthFor(w) - PAD * 2 - 4;
+    let tallest = panelHeightFor(wrapCount(ELEMENT_LABEL_ITEMS, content), true);
+    for (const t of TABS) tallest = Math.max(tallest, panelHeightFor(settingsRows(t.tab, content), false));
+    if (tallest > panelMaxHeight(h)) continue;
+    return ku;
+  }
+  return k;
+}
 
 export class Overlay {
+  /** The canvas the overlay is laid out and drawn on, `uiK` device pixels per pixel. */
   readonly layer: PixelLayer;
+  /** Device pixels per overlay pixel (see `uiPixelFor`); equal to the scene's scale in a landscape window. */
+  uiK = 1;
+  /** Device pixels per scene pixel. */
+  private k = 1;
+  private fbW = 1;
+  private fbH = 1;
+  private density: PixelDensity = "crisp";
+  /** Device rows above the canvas: it is anchored to the bottom-left so the HUD sits in the frame's corner. */
+  private offY = 0;
+  private readonly ptr = { x: 0, y: 0 };
   private readonly icons: HudIcons;
   private readonly hits: OverlayHit[] = [];
   private hitCount = 0;
@@ -239,25 +333,62 @@ export class Overlay {
   /** Panel rectangle of the last frame (for `blocksScene`), w = 0 when closed. */
   private readonly panelRect = { x: 0, y: 0, w: 0, h: 0 };
   private readonly panelLayout = { x: 0, y: 0, w: 0, h: 0, cx: 0, cy: 0, cw: 0 };
+  /** Lowest y at which a row of the open panel may start and still end inside it. */
+  private rowLimit = 0;
 
-  constructor(fbW = 1, fbH = 1) {
-    this.layer = new PixelLayer(fbW, fbH);
+  constructor(fbW = 1, fbH = 1, k = 1, density: PixelDensity = "crisp") {
+    this.layer = new PixelLayer(1, 1);
     this.icons = makeHudIcons();
+    this.configure(fbW, fbH, k, density);
   }
 
-  /** Palette indices, fbW × fbH, top row first; 255 is transparent. Pass this to the pipeline. */
+  /** Palette indices, `layer.w` × `layer.h`, top row first; 255 is transparent. Pass this to the pipeline. */
   get pixels(): Uint8Array {
     return this.layer.d;
   }
 
-  resize(fbW: number, fbH: number): void {
-    if (fbW === this.layer.w && fbH === this.layer.h) return;
-    this.layer.w = fbW;
-    this.layer.h = fbH;
-    this.layer.d = new Uint8Array(fbW * fbH).fill(255);
+  /** Scene pixels per overlay pixel: 1 in a landscape window, more (not always whole) in a narrow one. */
+  get scale(): number {
+    return this.uiK / this.k;
   }
 
-  private hit(x: number, y: number, w: number, h: number, action: OverlayAction): void {
+  /** Sizes the canvas for an fbW × fbH framebuffer shown at `k` device pixels per scene pixel. */
+  resize(fbW: number, fbH: number, k = 1, density: PixelDensity = "crisp"): void {
+    if (fbW === this.fbW && fbH === this.fbH && k === this.k && density === this.density) return;
+    this.configure(fbW, fbH, k, density);
+  }
+
+  private configure(fbW: number, fbH: number, k: number, density: PixelDensity): void {
+    const ku = uiPixelFor(fbW, fbH, k, density);
+    const w = Math.max(1, Math.floor((fbW * k) / ku));
+    const h = Math.max(1, Math.floor((fbH * k) / ku));
+    this.fbW = fbW;
+    this.fbH = fbH;
+    this.k = k;
+    this.density = density;
+    this.uiK = ku;
+    this.offY = Math.max(0, fbH * k - h * ku);
+    this.layer.w = w;
+    this.layer.h = h;
+    this.layer.d = new Uint8Array(w * h).fill(255);
+    this.hitCount = 0;
+    this.hits.length = 0;
+  }
+
+  /** Where the speech scroll is drawn, in framebuffer pixels. */
+  speechRect(): { x: number; y: number; w: number; h: number } {
+    const r = scrollRect(this.layer.w, this.layer.h);
+    const f = this.uiK / this.k;
+    return { x: r.x * f, y: (this.offY + r.y * this.uiK) / this.k, w: r.w * f, h: r.h * f };
+  }
+
+  /** Records a hit rectangle, cut to the framebuffer so no control can be hit (or reported) outside it. */
+  private hit(x0: number, y0: number, w0: number, h0: number, action: OverlayAction): void {
+    const x = Math.max(0, x0);
+    const y = Math.max(0, y0);
+    const w = Math.min(this.layer.w, x0 + w0) - x;
+    const h = Math.min(this.layer.h, y0 + h0) - y;
+    if (w <= 0 || h <= 0) return;
     let o = this.hits[this.hitCount];
     if (!o) {
       o = { x, y, w, h, action };
@@ -283,7 +414,12 @@ export class Overlay {
     const W = L.w;
     const H = L.h;
     this.hitCount = 0;
-    this.pointer = st.pointer;
+    if (st.pointer) {
+      // the pointer arrives in framebuffer pixels; hover is tested on the overlay's own canvas
+      this.ptr.x = (st.pointer.x * this.k) / this.uiK;
+      this.ptr.y = (st.pointer.y * this.k - this.offY) / this.uiK;
+      this.pointer = this.ptr;
+    } else this.pointer = null;
     this.panelRect.w = 0;
 
     // HUD (computed inline with zero per-frame allocations)
@@ -307,6 +443,17 @@ export class Overlay {
     if (st.panel === "settings") this.drawSettings(st);
     if (st.panel === "basket") this.drawBasket(st);
     this.hits.length = this.hitCount;
+    if (this.uiK !== this.k) {
+      // hit rectangles are handed out in framebuffer pixels, whatever the overlay's own pixel size
+      const f = this.uiK / this.k;
+      for (let i = 0; i < this.hitCount; i++) {
+        const o = this.hits[i] as OverlayHit;
+        o.x *= f;
+        o.y = (this.offY + o.y * this.uiK) / this.k;
+        o.w *= f;
+        o.h *= f;
+      }
+    }
     return this.hits;
   }
 
@@ -326,16 +473,16 @@ export class Overlay {
 
   // -------------------------------------------------------------------------------------------- layout helpers
   private panelWidth(): number {
-    return Math.max(60, Math.min(this.layer.w - 6, 236));
+    return panelWidthFor(this.layer.w);
   }
 
   private panel(title: string | null, contentRows: number): { x: number; y: number; w: number; h: number; cx: number; cy: number; cw: number } {
     const L = this.layer;
     const w = this.panelWidth();
-    const maxH = Math.max(40, L.h - 40);
-    const h = Math.min(maxH, PAD * 2 + 4 + (title ? ROW_H + 2 : 0) + contentRows * ROW_H);
-    const x = 3;
+    // the panel hangs from the top and stops above the HUD block, so the two never overlap
     const y = 3;
+    const h = Math.min(panelMaxHeight(L.h), panelHeightFor(contentRows, title !== null));
+    const x = Math.min(3, L.w - w);
     drawPanel(L, x, y, w, h);
     this.panelRect.x = x;
     this.panelRect.y = y;
@@ -359,6 +506,7 @@ export class Overlay {
     this.panelLayout.cx = x + PAD + 2;
     this.panelLayout.cy = cy;
     this.panelLayout.cw = w - PAD * 2 - 4;
+    this.rowLimit = y + h - PAD + 2 - ROW_H;
     return this.panelLayout;
   }
 
@@ -387,7 +535,7 @@ export class Overlay {
   ): number {
     const L = this.layer;
     drawText(L, x, y + 1, label, S.ink);
-    const stacked = cw < LABEL_W + 28;
+    const stacked = cw < STACK_BELOW;
     const x0 = stacked ? x : x + LABEL_W;
     const right = x + cw;
     let px = x0;
@@ -398,6 +546,7 @@ export class Overlay {
         px = x0;
         py += ROW_H;
       }
+      if (py > this.rowLimit) break; // a wrapped row never spills out of the panel (and onto the HUD)
       px += this.chip(px, py, o.label, o.value === current, action(o.value)) + CHIP_GAP;
     }
     return py + ROW_H;
@@ -407,20 +556,9 @@ export class Overlay {
   private drawSettings(st: OverlayState): void {
     const s = st.settings;
     const cwGuess = this.panelWidth() - PAD * 2 - 4;
-    const stacked = cwGuess < LABEL_W + 28;
-    const chipMaxW = stacked ? cwGuess : cwGuess - LABEL_W;
-    const tabMaxW = Math.max(24, cwGuess - 12);
-    const tabRows = wrapCount(TABS, tabMaxW);
-    const extra = stacked ? 1 : 0;
-    const rows =
-      st.tab === "look"
-        ? extra * 4 + wrapCount(VARIANTS, chipMaxW) + wrapCount(MOODS, chipMaxW) + wrapCount(CAMERA_ROW, chipMaxW) + wrapCount(DENSITIES, chipMaxW)
-        : st.tab === "garden"
-          ? 3 * (stacked ? 2 : 1) + extra * 2 + wrapCount(PATTERNS, chipMaxW) + wrapCount(TALK, chipMaxW)
-          : st.tab === "sound"
-            ? MIX.length + 1
-            : extra + wrapCount(PRESET_LABEL_ITEMS, chipMaxW) + 2;
-    const p = this.panel(null, rows + tabRows);
+    const stacked = cwGuess < STACK_BELOW;
+    const mixStacked = cwGuess < LABEL_W + MIX_PIPS_W;
+    const p = this.panel(null, settingsRows(st.tab, cwGuess));
     const L = this.layer;
     // tabs (wrapped within panel width minus close button so portrait viewports stay onscreen)
     let tx = p.cx;
@@ -455,7 +593,7 @@ export class Overlay {
         break;
       case "sound":
         for (const m of MIX) {
-          if (y + ROW_H <= bottom + 2) y = this.mixRow(x, y, m.ch, m.label, s.mix[m.ch]);
+          if (y + ROW_H * (mixStacked ? 2 : 1) <= bottom + 2) y = this.mixRow(x, y, cw, m.ch, m.label, s.mix[m.ch]);
         }
         if (y + ROW_H <= bottom + 2) y = this.chipRow(x, y, cw, "Mute", ON_OFF, s.mix.muted, actMute);
         break;
@@ -478,9 +616,10 @@ export class Overlay {
           y = py + ROW_H;
         }
         if (y + ROW_H <= bottom + 2) y = this.chipRow(x, y, cw, "Watch", WATCH_OPTIONS, st.watchGubbaRake, actWatch);
-        if (y + ROW_H <= bottom + 2) {
+        if (y + ROW_H * (stacked ? 2 : 1) <= bottom + 2) {
           drawText(L, x, y + 1, "Picture", S.ink);
-          this.chip(x + LABEL_W, y, "Export PNG", false, EXPORT);
+          if (stacked) y += ROW_H;
+          this.chip(stacked ? x : x + LABEL_W, y, "Export PNG", false, EXPORT);
           y += ROW_H;
         }
         break;
@@ -488,11 +627,13 @@ export class Overlay {
     }
   }
 
-  /** Eight pips 0…7 for one mix channel. */
-  private mixRow(x: number, y: number, ch: MixChannel, label: string, value: number): number {
+  /** Eight pips 0…7 for one mix channel, beside the label or under it when the panel is too narrow for both. */
+  private mixRow(x: number, y0: number, cw: number, ch: MixChannel, label: string, value: number): number {
     const L = this.layer;
-    drawText(L, x, y + 1, label, S.ink);
-    let px = x + LABEL_W;
+    drawText(L, x, y0 + 1, label, S.ink);
+    const stacked = cw < LABEL_W + MIX_PIPS_W;
+    const y = stacked ? y0 + ROW_H : y0;
+    let px = stacked ? x + 1 : x + LABEL_W;
     for (let v = 0; v <= 7; v++) {
       const on = v <= value && value > 0 && v > 0;
       if (v === 0) {

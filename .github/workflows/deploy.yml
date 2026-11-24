@@ -56,15 +56,15 @@ jobs:
       - name: Run Playwright E2E gate (manual dispatch)
         if: github.event_name == 'workflow_dispatch'
         env:
-          BASE_PATH: /rake-me/
+          BASE_PATH: /gubbas-porch/
         run: npm run test:e2e
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
-      - name: Build production bundle (BASE_PATH=/rake-me/)
+      - name: Build production bundle (BASE_PATH=/gubbas-porch/)
         env:
-          BASE_PATH: /rake-me/
+          BASE_PATH: /gubbas-porch/
         run: npm run build
 
       - name: Check bundle budgets

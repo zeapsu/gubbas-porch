@@ -104,14 +104,21 @@ export function hudSlot(i: number, fbH: number): { x: number; y: number } {
   return { x: HUD_LEFT + col * HUD_ICON, y: fbH - HUD_FROM_BOTTOM + row * (HUD_ICON + 1) };
 }
 
-/** Narrow framebuffers (portrait phones) put the scroll above the HUD instead of beside it. */
+/** Below this width beside the HUD, the scroll goes above it instead. */
 const SCROLL_BESIDE_MIN = 100;
 
-/** Rectangle of the speech scroll for a framebuffer of fbW × fbH. */
-export function scrollRect(fbW: number, fbH: number): { x: number; y: number; w: number; h: number } {
-  const beside = fbW - 60;
-  if (beside >= SCROLL_BESIDE_MIN) return { x: SCROLL_X, y: fbH - 34, w: Math.min(SCROLL_MAX_W, beside), h: SCROLL_H };
-  return { x: HUD_LEFT, y: fbH - HUD_FROM_BOTTOM - SCROLL_H - 2, w: Math.max(24, Math.min(SCROLL_MAX_W, fbW - 6)), h: SCROLL_H };
+/**
+ * Rectangle of the speech scroll on an overlay canvas of w × h. It sits beside the HUD when it can have its full
+ * width there. On a canvas at least 1.1 times taller than wide the deck below the garden is empty, so a scroll
+ * that would be squeezed beside the HUD goes above it at full width instead; a wider canvas keeps it beside.
+ */
+export function scrollRect(w: number, h: number): { x: number; y: number; w: number; h: number } {
+  const beside = w - 60;
+  const tall = h * 10 >= w * 11;
+  if (beside >= SCROLL_MAX_W || (beside >= SCROLL_BESIDE_MIN && !tall)) {
+    return { x: SCROLL_X, y: h - 34, w: Math.min(SCROLL_MAX_W, beside), h: SCROLL_H };
+  }
+  return { x: HUD_LEFT, y: h - HUD_FROM_BOTTOM - SCROLL_H - 2, w: Math.max(24, Math.min(SCROLL_MAX_W, w - 6)), h: SCROLL_H };
 }
 
 /** Draws the speech scroll with up to three lines of ink-on-paper text. Returns its rectangle. */
