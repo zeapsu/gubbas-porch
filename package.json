@@ -5,7 +5,7 @@
   "type": "module",
   "description": "A serene 3D 8-bit Zen garden for the browser with Gubba and the Wall of Rakes.",
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.12.0"
   },
   "scripts": {
     "dev": "vite",
@@ -38,7 +38,7 @@
     "tsx": "^4.19.3",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.29.1",
-    "vite": "^6.2.6",
-    "vitest": "^3.1.1"
+    "vite": "^8.3.8",
+    "vitest": "^5.1.1"
   }
 }
