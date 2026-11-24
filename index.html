@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="description" content="Rake Me — a quiet 3D 8-bit Zen garden for pure relaxation." />
+    <title>Rake Me</title>
+    <style>
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #2a1d1a;
+        color: #f4ead0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        user-select: none;
+        -webkit-user-select: none;
+        touch-action: none;
+      }
+      #stage {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #2a1d1a;
+      }
+      #garden-canvas {
+        display: block;
+        image-rendering: pixelated;
+        image-rendering: crisp-edges;
+        outline: none;
+      }
+      #title-card {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        background: rgba(42, 29, 26, 0.72);
+        color: #f4ead0;
+        cursor: pointer;
+        z-index: 20;
+      }
+      #title-card[hidden] {
+        display: none;
+      }
+      .card-box {
+        background: #f4ead0;
+        color: #2a1d1a;
+        border: 3px solid #2a1d1a;
+        box-shadow: 4px 4px 0 #2a1d1a;
+        padding: 20px 28px;
+        text-align: center;
+        max-width: 340px;
+      }
+      .card-title {
+        font-size: 20px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        margin: 0 0 8px;
+      }
+      .card-sub {
+        font-size: 13px;
+        margin: 0;
+        opacity: 0.85;
+      }
+      #webgl2-fallback {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #2a1d1a;
+        z-index: 50;
+      }
+      #webgl2-fallback[hidden] {
+        display: none;
+      }
+      #portrait-hint {
+        position: fixed;
+        top: 10px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: #f4ead0;
+        color: #2a1d1a;
+        border: 2px solid #2a1d1a;
+        padding: 4px 10px;
+        font-size: 11px;
+        z-index: 15;
+        pointer-events: none;
+      }
+      #portrait-hint[hidden] {
+        display: none;
+      }
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <main id="stage">
+      <canvas id="garden-canvas" aria-label="Rake Me 3D 8-bit Zen garden"></canvas>
+    </main>
+
+    <div id="title-card" role="button" tabindex="0" aria-label="Enter the Zen garden">
+      <div class="card-box">
+        <p class="card-title">RAKE ME</p>
+        <p class="card-sub">press anywhere</p>
+      </div>
+    </div>
+
+    <div id="portrait-hint" hidden>landscape shows more garden</div>
+
+    <div id="webgl2-fallback" hidden>
+      <div class="card-box">
+        <p class="card-title">RAKE ME</p>
+        <p class="card-sub">this garden needs WebGL2</p>
+      </div>
+    </div>
+
+    <div id="sr-controls" class="sr-only" aria-label="Garden controls"></div>
+    <div id="sr-live" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

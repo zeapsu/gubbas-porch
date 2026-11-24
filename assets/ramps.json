@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "ramps": {
+    "sand": { "id": 0, "slots": [0, 1, 2, 3, 4], "emissive": false },
+    "stone": { "id": 1, "slots": [5, 6, 7, 8], "emissive": false },
+    "wood": { "id": 2, "slots": [9, 10, 11, 12], "emissive": false },
+    "wood_light": { "id": 3, "slots": [11, 12, 31], "emissive": false },
+    "leaf": { "id": 4, "slots": [13, 14, 15, 16], "emissive": false },
+    "water": { "id": 5, "slots": [20, 21, 22], "emissive": false },
+    "warm": { "id": 6, "slots": [23, 23, 24], "emissive": false },
+    "gubba": { "id": 7, "slots": [26, 27, 28], "emissive": false },
+    "belly": { "id": 8, "slots": [28, 29, 29], "emissive": false },
+    "cloth": { "id": 9, "slots": [8, 31, 31], "emissive": false },
+    "ink": { "id": 10, "slots": [30], "emissive": true },
+    "paper": { "id": 11, "slots": [31], "emissive": true },
+    "glow": { "id": 12, "slots": [25], "emissive": true },
+    "blush": { "id": 13, "slots": [24], "emissive": true }
+  }
+}

@@ -1,0 +1,1102 @@
+{
+  "version": 1,
+  "specSha256": "45358c486f0f60886a07269270e1e82fb0ef7dc589a185d32b75d4cb5f09fd5d",
+  "models": [
+    {
+      "id": "rake_sugi",
+      "file": "rakes/sugi.glb",
+      "bytes": 1804,
+      "sha256": "51dc19ca5c5cd1f82c48dd58ae90507df30f2c09ab89bbfe8d7f04113f0f0e0d",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Head",
+        "Handle",
+        "tine_0",
+        "tine_1",
+        "tine_2",
+        "tine_3",
+        "tine_4"
+      ],
+      "materials": [
+        "rm_wood",
+        "rm_wood_light"
+      ],
+      "bounds": {
+        "min": [
+          -10,
+          0,
+          -1
+        ],
+        "max": [
+          10,
+          6.5,
+          47
+        ],
+        "size": [
+          20,
+          6.5,
+          48
+        ]
+      }
+    },
+    {
+      "id": "rake_onami",
+      "file": "rakes/onami.glb",
+      "bytes": 2008,
+      "sha256": "50a0ad15d82603477999f502a4c997809610eb72a4bc03ccdba5e98ed406a4b2",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Head",
+        "Handle",
+        "tine_0",
+        "tine_1",
+        "tine_2",
+        "tine_3",
+        "tine_4",
+        "tine_5",
+        "tine_6",
+        "tine_7",
+        "tine_8"
+      ],
+      "materials": [
+        "rm_wood_light",
+        "rm_wood",
+        "rm_stone"
+      ],
+      "bounds": {
+        "min": [
+          -18,
+          0,
+          -1
+        ],
+        "max": [
+          18,
+          6.5,
+          49
+        ],
+        "size": [
+          36,
+          6.5,
+          50
+        ]
+      }
+    },
+    {
+      "id": "rake_kinu",
+      "file": "rakes/kinu.glb",
+      "bytes": 1928,
+      "sha256": "8072254496e5d6ec56c91a5b895c9bfa62fd94a9b8be97ed1e20bbec1aa0e3c5",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Head",
+        "Handle",
+        "tine_0",
+        "tine_1",
+        "tine_2",
+        "tine_3",
+        "tine_4",
+        "tine_5",
+        "tine_6",
+        "tine_7",
+        "tine_8",
+        "tine_9",
+        "tine_10"
+      ],
+      "materials": [
+        "rm_wood_light",
+        "rm_leaf"
+      ],
+      "bounds": {
+        "min": [
+          -11.5,
+          0,
+          -1
+        ],
+        "max": [
+          11.5,
+          6,
+          45
+        ],
+        "size": [
+          23,
+          6,
+          46
+        ]
+      }
+    },
+    {
+      "id": "rake_hisui",
+      "file": "rakes/hisui.glb",
+      "bytes": 1964,
+      "sha256": "37fdceaaff7c2975836a665d4bc77c7c2913839544863fb3ba526bcd146f0400",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Head",
+        "Handle",
+        "tine_0",
+        "tine_1",
+        "tine_2",
+        "tine_3",
+        "tine_4",
+        "tine_5",
+        "tine_6"
+      ],
+      "materials": [
+        "rm_stone",
+        "rm_leaf",
+        "rm_warm"
+      ],
+      "bounds": {
+        "min": [
+          -9.5,
+          0,
+          -1
+        ],
+        "max": [
+          9.5,
+          6.5,
+          45
+        ],
+        "size": [
+          19,
+          6.5,
+          46
+        ]
+      }
+    },
+    {
+      "id": "rake_mikazuki",
+      "file": "rakes/mikazuki.glb",
+      "bytes": 1952,
+      "sha256": "2dc498ae9c97d5a58927f1734dfdb200e3463c8bdb6cf4a4e2e7a8d1bd7d7ca8",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Head",
+        "Handle",
+        "tine_0",
+        "tine_1",
+        "tine_2",
+        "tine_3",
+        "tine_4",
+        "tine_5"
+      ],
+      "materials": [
+        "rm_wood",
+        "rm_wood_light",
+        "rm_water"
+      ],
+      "bounds": {
+        "min": [
+          -12,
+          0,
+          -1
+        ],
+        "max": [
+          12,
+          6.5,
+          47
+        ],
+        "size": [
+          24,
+          6.5,
+          48
+        ]
+      }
+    },
+    {
+      "id": "rake_tetsu",
+      "file": "rakes/tetsu.glb",
+      "bytes": 1764,
+      "sha256": "efe6a13787d578b6188ea88f13394a34e362228801be103bb8dda66be2aa5f37",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Head",
+        "Handle",
+        "tine_0",
+        "tine_1",
+        "tine_2"
+      ],
+      "materials": [
+        "rm_stone",
+        "rm_wood"
+      ],
+      "bounds": {
+        "min": [
+          -8.5,
+          0,
+          -1
+        ],
+        "max": [
+          8.5,
+          7.5,
+          49
+        ],
+        "size": [
+          17,
+          7.5,
+          50
+        ]
+      }
+    },
+    {
+      "id": "rake_wa",
+      "file": "rakes/wa.glb",
+      "bytes": 1732,
+      "sha256": "bd017852b40d3e66af6c057d881a85ec31738bbc26fe156f2708cd7afb2f80e3",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Head",
+        "Handle",
+        "tine_0",
+        "tine_1"
+      ],
+      "materials": [
+        "rm_wood",
+        "rm_warm"
+      ],
+      "bounds": {
+        "min": [
+          -6,
+          0,
+          -1
+        ],
+        "max": [
+          6,
+          6.5,
+          43
+        ],
+        "size": [
+          12,
+          6.5,
+          44
+        ]
+      }
+    },
+    {
+      "id": "rake_take",
+      "file": "rakes/take.glb",
+      "bytes": 1724,
+      "sha256": "c539ee2c32df752acddc0afc84c5d0188f55040d67e09fe324997860b992871b",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Head",
+        "Handle",
+        "tine_0"
+      ],
+      "materials": [
+        "rm_leaf",
+        "rm_wood_light"
+      ],
+      "bounds": {
+        "min": [
+          -1.5,
+          0,
+          -1
+        ],
+        "max": [
+          1.5,
+          6,
+          41
+        ],
+        "size": [
+          3,
+          6,
+          42
+        ]
+      }
+    },
+    {
+      "id": "rake_nagi",
+      "file": "rakes/nagi.glb",
+      "bytes": 1700,
+      "sha256": "d188fd3cbbb7dccca0677683831fa36d47090a229f9e71466cffe445997e883b",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Head",
+        "Handle"
+      ],
+      "materials": [
+        "rm_wood_light",
+        "rm_wood"
+      ],
+      "bounds": {
+        "min": [
+          -8,
+          0,
+          -1
+        ],
+        "max": [
+          8,
+          6,
+          43
+        ],
+        "size": [
+          16,
+          6,
+          44
+        ]
+      }
+    },
+    {
+      "id": "rake_hoki",
+      "file": "rakes/hoki.glb",
+      "bytes": 1816,
+      "sha256": "891e5405483fae0ab694962b8c468e94cd34ee7ea5b01dd2444fbd751404474e",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Head",
+        "Handle"
+      ],
+      "materials": [
+        "rm_leaf",
+        "rm_wood",
+        "rm_warm"
+      ],
+      "bounds": {
+        "min": [
+          -6,
+          0,
+          -1
+        ],
+        "max": [
+          6,
+          7,
+          45
+        ],
+        "size": [
+          12,
+          7,
+          46
+        ]
+      }
+    },
+    {
+      "id": "prop_frame",
+      "file": "props/frame.glb",
+      "bytes": 1680,
+      "sha256": "079323af699aef5fa3fb20b7c9eeb280d7dd10d3148d41325ba10662493410d9",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Frame"
+      ],
+      "materials": [
+        "rm_wood",
+        "rm_leaf"
+      ],
+      "bounds": {
+        "min": [
+          -102,
+          0,
+          -62
+        ],
+        "max": [
+          102,
+          6,
+          62
+        ],
+        "size": [
+          204,
+          6,
+          124
+        ]
+      }
+    },
+    {
+      "id": "prop_engawa",
+      "file": "props/engawa.glb",
+      "bytes": 1564,
+      "sha256": "7043b9197860baf7e467510049c03ab4759fd91f735c04291c0672a205bb97cd",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Engawa"
+      ],
+      "materials": [
+        "rm_wood"
+      ],
+      "bounds": {
+        "min": [
+          -190,
+          0,
+          -125
+        ],
+        "max": [
+          190,
+          4,
+          125
+        ],
+        "size": [
+          380,
+          4,
+          250
+        ]
+      }
+    },
+    {
+      "id": "prop_rack",
+      "file": "props/rack.glb",
+      "bytes": 1748,
+      "sha256": "59e04c5a774dbc02b91df28e3af3564c501d6ea1cb78531469375de029f3c318",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Wall",
+        "UpperRail",
+        "LowerRail",
+        "Shelf"
+      ],
+      "materials": [
+        "rm_wood",
+        "rm_wood_light"
+      ],
+      "bounds": {
+        "min": [
+          -150,
+          0,
+          -8
+        ],
+        "max": [
+          150,
+          72,
+          8
+        ],
+        "size": [
+          300,
+          72,
+          16
+        ]
+      }
+    },
+    {
+      "id": "prop_stone_s",
+      "file": "props/stone_s.glb",
+      "bytes": 1560,
+      "sha256": "dea767b8f380b2f95cf7e2413cb739a5df4d9f9d2ac25b396f6ed0e23ab81483",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Stone"
+      ],
+      "materials": [
+        "rm_stone"
+      ],
+      "bounds": {
+        "min": [
+          -4,
+          0,
+          -3
+        ],
+        "max": [
+          4,
+          5,
+          3
+        ],
+        "size": [
+          8,
+          5,
+          6
+        ]
+      }
+    },
+    {
+      "id": "prop_stone_m",
+      "file": "props/stone_m.glb",
+      "bytes": 1680,
+      "sha256": "ae0316a86b23354ee851a78018ee2f9fbdc4d597d9e6ebf1aa34f0b4824c342d",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Stone"
+      ],
+      "materials": [
+        "rm_stone",
+        "rm_leaf"
+      ],
+      "bounds": {
+        "min": [
+          -7,
+          0,
+          -5
+        ],
+        "max": [
+          7,
+          8,
+          5
+        ],
+        "size": [
+          14,
+          8,
+          10
+        ]
+      }
+    },
+    {
+      "id": "prop_stone_l",
+      "file": "props/stone_l.glb",
+      "bytes": 1684,
+      "sha256": "b5e8d8cf79caa5433868f85fbdaec006d88698b92cb578c33718f346ecacc712",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Stone"
+      ],
+      "materials": [
+        "rm_stone",
+        "rm_leaf"
+      ],
+      "bounds": {
+        "min": [
+          -10,
+          0,
+          -7
+        ],
+        "max": [
+          10,
+          15,
+          7
+        ],
+        "size": [
+          20,
+          15,
+          14
+        ]
+      }
+    },
+    {
+      "id": "prop_stone_tall",
+      "file": "props/stone_tall.glb",
+      "bytes": 1688,
+      "sha256": "085a9f96da465469407161ddb36f1cc9c709db6d89da3963336095fd114ceb37",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Stone"
+      ],
+      "materials": [
+        "rm_stone",
+        "rm_leaf"
+      ],
+      "bounds": {
+        "min": [
+          -5,
+          0,
+          -4
+        ],
+        "max": [
+          5,
+          20,
+          4
+        ],
+        "size": [
+          10,
+          20,
+          8
+        ]
+      }
+    },
+    {
+      "id": "prop_stone_flat",
+      "file": "props/stone_flat.glb",
+      "bytes": 1688,
+      "sha256": "9835eefc596cbec0aa1d80c0b4e89497614026f61712bd602ff4d5cf1c336029",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Stone"
+      ],
+      "materials": [
+        "rm_stone",
+        "rm_leaf"
+      ],
+      "bounds": {
+        "min": [
+          -11,
+          0,
+          -5
+        ],
+        "max": [
+          11,
+          5,
+          5
+        ],
+        "size": [
+          22,
+          5,
+          10
+        ]
+      }
+    },
+    {
+      "id": "prop_moss_a",
+      "file": "props/moss_a.glb",
+      "bytes": 1560,
+      "sha256": "0f2ece1820888196102fbae4e7ac8bcdaf5ff874991c93d0d82fee334732410b",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Moss"
+      ],
+      "materials": [
+        "rm_leaf"
+      ],
+      "bounds": {
+        "min": [
+          -13,
+          0,
+          -9
+        ],
+        "max": [
+          13,
+          2.5,
+          9
+        ],
+        "size": [
+          26,
+          2.5,
+          18
+        ]
+      }
+    },
+    {
+      "id": "prop_moss_b",
+      "file": "props/moss_b.glb",
+      "bytes": 1556,
+      "sha256": "6b0709c52a575daeb43f348c089d0d73706214ea3cf522dd17b8aed1e6226e72",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Moss"
+      ],
+      "materials": [
+        "rm_leaf"
+      ],
+      "bounds": {
+        "min": [
+          -9,
+          0,
+          -6
+        ],
+        "max": [
+          9,
+          2.5,
+          6
+        ],
+        "size": [
+          18,
+          2.5,
+          12
+        ]
+      }
+    },
+    {
+      "id": "prop_lantern",
+      "file": "props/lantern.glb",
+      "bytes": 1704,
+      "sha256": "b35f2b3e43178744f98c810e4186ea91251b9d4c79c13631b17a8fd6765fbdbb",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Lantern",
+        "Window"
+      ],
+      "materials": [
+        "rm_stone",
+        "rm_glow"
+      ],
+      "bounds": {
+        "min": [
+          -5,
+          0,
+          -4
+        ],
+        "max": [
+          5,
+          27,
+          4
+        ],
+        "size": [
+          10,
+          27,
+          8
+        ]
+      }
+    },
+    {
+      "id": "prop_bonsai",
+      "file": "props/bonsai.glb",
+      "bytes": 1836,
+      "sha256": "000f86200503e31fb0903d363844d2b7664255899516a150023efa4d45169766",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Pot",
+        "Trunk",
+        "Canopy"
+      ],
+      "materials": [
+        "rm_water",
+        "rm_wood",
+        "rm_leaf"
+      ],
+      "bounds": {
+        "min": [
+          -6,
+          0,
+          -5
+        ],
+        "max": [
+          6,
+          22,
+          5
+        ],
+        "size": [
+          12,
+          22,
+          10
+        ]
+      }
+    },
+    {
+      "id": "prop_basin",
+      "file": "props/basin.glb",
+      "bytes": 1696,
+      "sha256": "1def6cd4e7f9ec1fe66a21aa663fac4f8435c07fb55d395fea5919a005d9962d",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Basin",
+        "Water"
+      ],
+      "materials": [
+        "rm_stone",
+        "rm_water"
+      ],
+      "bounds": {
+        "min": [
+          -8,
+          0,
+          -6
+        ],
+        "max": [
+          8,
+          6,
+          6
+        ],
+        "size": [
+          16,
+          6,
+          12
+        ]
+      }
+    },
+    {
+      "id": "prop_pin",
+      "file": "props/pin.glb",
+      "bytes": 1548,
+      "sha256": "319319a263d2405145dc89a04d912ffa5e0f3fddf95c4a08cb936a76807fa31b",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Pin"
+      ],
+      "materials": [
+        "rm_warm"
+      ],
+      "bounds": {
+        "min": [
+          -1,
+          0,
+          -1
+        ],
+        "max": [
+          1,
+          3,
+          1
+        ],
+        "size": [
+          2,
+          3,
+          2
+        ]
+      }
+    },
+    {
+      "id": "prop_basket",
+      "file": "props/basket.glb",
+      "bytes": 1808,
+      "sha256": "6bf68f19b5850bbdab562e322a794d1def785ab2841194468e6dae04360c4317",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Basket"
+      ],
+      "materials": [
+        "rm_wood",
+        "rm_wood_light",
+        "rm_stone"
+      ],
+      "bounds": {
+        "min": [
+          -10,
+          0,
+          -9
+        ],
+        "max": [
+          10,
+          10,
+          9
+        ],
+        "size": [
+          20,
+          10,
+          18
+        ]
+      }
+    },
+    {
+      "id": "prop_shishi_odoshi",
+      "file": "props/shishi_odoshi.glb",
+      "bytes": 1984,
+      "sha256": "95ab9959bbb34b273af597e75619b806086d6739d951d2c46cb4c2ee2d8e5069",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Basin",
+        "BambooArm",
+        "Spout"
+      ],
+      "materials": [
+        "rm_stone",
+        "rm_water",
+        "rm_leaf",
+        "rm_wood"
+      ],
+      "bounds": {
+        "min": [
+          -12,
+          0,
+          -10
+        ],
+        "max": [
+          12,
+          22,
+          10
+        ],
+        "size": [
+          24,
+          22,
+          20
+        ]
+      }
+    },
+    {
+      "id": "prop_bamboo",
+      "file": "props/bamboo.glb",
+      "bytes": 1572,
+      "sha256": "762422db986a4ffb1c22f91c212eea20bed06186c8293dd3c5d1403e12bb0850",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "BambooCluster"
+      ],
+      "materials": [
+        "rm_leaf"
+      ],
+      "bounds": {
+        "min": [
+          -140,
+          0,
+          -8
+        ],
+        "max": [
+          140,
+          132,
+          8
+        ],
+        "size": [
+          280,
+          132,
+          16
+        ]
+      }
+    },
+    {
+      "id": "gubba_moss",
+      "file": "gubba_moss.glb",
+      "bytes": 2840,
+      "sha256": "4837754f573a82a787681b3332a73df4dbebcd382d8acae053ad1ad319a79c7f",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Root",
+        "Body",
+        "Head",
+        "EyeL",
+        "EyeR",
+        "PupilL",
+        "PupilR",
+        "LidL",
+        "LidR",
+        "Mouth",
+        "ArmL",
+        "ArmR",
+        "Cup",
+        "Tail1",
+        "Tail2",
+        "Tail3",
+        "Prop_Bonsai"
+      ],
+      "materials": [
+        "rm_gubba",
+        "rm_belly",
+        "rm_leaf",
+        "rm_warm",
+        "rm_wood",
+        "rm_ink",
+        "rm_paper",
+        "rm_blush",
+        "rm_cloth"
+      ],
+      "bounds": {
+        "min": [
+          -24,
+          0,
+          -21
+        ],
+        "max": [
+          24,
+          40,
+          21
+        ],
+        "size": [
+          48,
+          40,
+          42
+        ]
+      }
+    },
+    {
+      "id": "gubba_kasa",
+      "file": "gubba_kasa.glb",
+      "bytes": 2964,
+      "sha256": "e8252dc92a726ef17e5514c81a7c14c143a4a2ba4aa63d26934e8cf0b75e5ab5",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Root",
+        "Body",
+        "Head",
+        "EyeL",
+        "EyeR",
+        "PupilL",
+        "PupilR",
+        "LidL",
+        "LidR",
+        "Mouth",
+        "ArmL",
+        "ArmR",
+        "Cup",
+        "Tail1",
+        "Tail2",
+        "Tail3",
+        "Prop_Hat"
+      ],
+      "materials": [
+        "rm_gubba",
+        "rm_belly",
+        "rm_wood_light",
+        "rm_wood",
+        "rm_water",
+        "rm_warm",
+        "rm_ink",
+        "rm_paper",
+        "rm_blush",
+        "rm_cloth"
+      ],
+      "bounds": {
+        "min": [
+          -22,
+          0,
+          -20
+        ],
+        "max": [
+          22,
+          42,
+          20
+        ],
+        "size": [
+          44,
+          42,
+          40
+        ]
+      }
+    },
+    {
+      "id": "gubba_lantern",
+      "file": "gubba_lantern.glb",
+      "bytes": 2964,
+      "sha256": "98841fea185d38a2ec9b52d644717d6f35ccccc7289b33afd0a835868eb167f2",
+      "triangles": 12,
+      "vertices": 24,
+      "nodes": [
+        "Root",
+        "Body",
+        "Head",
+        "EyeL",
+        "EyeR",
+        "PupilL",
+        "PupilR",
+        "LidL",
+        "LidR",
+        "Mouth",
+        "ArmL",
+        "ArmR",
+        "Cup",
+        "Tail1",
+        "Tail2",
+        "Tail3",
+        "Prop_Shell"
+      ],
+      "materials": [
+        "rm_gubba",
+        "rm_belly",
+        "rm_sand",
+        "rm_glow",
+        "rm_cloth",
+        "rm_warm",
+        "rm_wood",
+        "rm_ink",
+        "rm_paper",
+        "rm_blush"
+      ],
+      "bounds": {
+        "min": [
+          -26,
+          0,
+          -19
+        ],
+        "max": [
+          26,
+          42,
+          19
+        ],
+        "size": [
+          52,
+          42,
+          38
+        ]
+      }
+    }
+  ]
+}

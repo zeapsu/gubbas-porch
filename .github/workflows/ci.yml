@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  review-gate:
+    name: Review Gate (REVIEW.md)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Enforce REVIEW.md gate
+        run: node .github/scripts/review-gate.mjs
+
+  verify:
+    name: Static Checks, Assets, Unit Tests & Build
+    runs-on: ubuntu-latest
+    needs: [review-gate]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Verify Blender GLB assets & manifest
+        run: npm run verify:assets
+
+      - name: Unit & property tests
+        run: npm run test:unit
+
+      - name: Build (GitHub Pages BASE_PATH=/rake-me/)
+        env:
+          BASE_PATH: /rake-me/
+        run: npm run build
+
+      - name: Check bundle budgets
+        run: npm run check:bundle
+
+      - name: Build (Domain root BASE_PATH=/)
+        env:
+          BASE_PATH: /
+        run: npm run build
+
+  e2e:
+    name: Browser E2E & 8-Bit Visual Verification
+    runs-on: ubuntu-latest
+    needs: [verify]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright verification (software WebGL)
+        env:
+          BASE_PATH: /rake-me/
+        run: npm run test:e2e
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7

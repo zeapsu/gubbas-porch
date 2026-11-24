@@ -1,0 +1,41 @@
+{
+  "name": "rake-me",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A serene 3D 8-bit Zen garden for the browser with Gubba and the Wall of Rakes.",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --strictPort --port 4173",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "verify:assets": "tsx scripts/verify-assets.ts",
+    "assets:placeholders": "tsx scripts/make-placeholders.ts",
+    "check:bundle": "tsx scripts/check-bundle.ts",
+    "test:unit": "vitest run",
+    "test:e2e": "playwright test",
+    "review:gate": "node .github/scripts/review-gate.mjs",
+    "verify": "npm run review:gate && npm run typecheck && npm run lint && npm run verify:assets && npm run test:unit && BASE_PATH=/rake-me/ npm run build && npm run check:bundle && BASE_PATH=/ npm run build && npm run test:e2e"
+  },
+  "dependencies": {
+    "three": "^0.175.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.24.0",
+    "@playwright/test": "^1.51.1",
+    "@types/node": "^22.14.0",
+    "@types/three": "^0.175.0",
+    "eslint": "^9.24.0",
+    "fast-check": "^3.23.2",
+    "globals": "^16.0.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.29.1",
+    "vite": "^6.2.6",
+    "vitest": "^3.1.1"
+  }
+}
