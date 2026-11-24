@@ -12,12 +12,16 @@
  *  3. Pull request contract (when running in GitHub Actions PR context):
  *     - PR body contains Risk Tier, Testing, and How to Revert sections
  *     - Computed risk tier from changed paths is not under-declared by the PR body
+ *     - Exception: both PR-body checks are skipped for dependabot[bot] PRs that only touch
+ *       package.json, package-lock.json, or .github/workflows/*.yml / .yaml (checks 1 and 2
+ *       still run)
  *     - Prints a structured REVIEW.md summary header
  */
 
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { ALLOWED_DEPENDABOT_FILES_TEXT, isAllowedDependabotFile } from "./dependabot-auto-merge.mjs";
 
 const ROOT = process.cwd();
 const errors = [];
@@ -46,10 +50,12 @@ function getChangedFiles(baseRef) {
   try {
     const out = execFileSync(
       "git",
-      ["diff", "--name-only", `${baseRef}...HEAD`],
+      // --no-renames lists both sides of a rename, so a moved file cannot hide its old path.
+      // -z emits each path verbatim (no quoting of unusual names, no whitespace to trim).
+      ["diff", "--name-only", "--no-renames", "-z", `${baseRef}...HEAD`],
       { cwd: ROOT, encoding: "utf8" },
     );
-    return out.split("\n").map((s) => s.trim()).filter(Boolean);
+    return out.split("\0").filter(Boolean);
   } catch {
     return null;
   }
@@ -227,33 +233,49 @@ if (eventName === "pull_request" && eventPath && fs.existsSync(eventPath)) {
     }
   }
 
-  for (const section of ["Risk Tier", "Testing", "How to Revert"]) {
-    if (!new RegExp(`^##\\s+${section}\\b`, "im").test(body)) {
-      errors.push(
-        `PR body — missing required "## ${section}" section (see .github/pull_request_template.md)`,
-      );
-    }
-  }
+  // Dependabot cannot fill in the human PR template. Skip only the body checks, and only when the
+  // bot's PR is provably limited to dependency manifests and workflow files; anything else
+  // (other author, other path, empty or unknown diff) keeps the full contract.
+  const dependabotDepsOnly =
+    pr?.user?.login === "dependabot[bot]" &&
+    changed !== null &&
+    changed.length > 0 &&
+    changed.every(isAllowedDependabotFile);
 
-  const checkedTiers = [];
-  for (const tier of ["Low", "Medium", "High"]) {
-    if (new RegExp(`-\\s*\\[x\\]\\s*\\*\\*${tier}\\*\\*`, "i").test(body)) {
-      checkedTiers.push(tier);
-    }
-  }
-
-  if (checkedTiers.length === 0) {
-    errors.push(
-      `PR body — select one Risk Tier checkbox (minimum required for changed paths: ${computedTier})`,
+  if (dependabotDepsOnly) {
+    console.log(
+      `PR body check skipped — dependabot[bot] PR touching only ${ALLOWED_DEPENDABOT_FILES_TEXT}. ` +
+        "Governance and security checks above still ran.",
     );
   } else {
-    const declared = checkedTiers.reduce((a, b) =>
-      TIER_ORDER[a] >= TIER_ORDER[b] ? a : b,
-    );
-    if (TIER_ORDER[declared] < TIER_ORDER[computedTier]) {
+    for (const section of ["Risk Tier", "Testing", "How to Revert"]) {
+      if (!new RegExp(`^##\\s+${section}\\b`, "im").test(body)) {
+        errors.push(
+          `PR body — missing required "## ${section}" section (see .github/pull_request_template.md)`,
+        );
+      }
+    }
+
+    const checkedTiers = [];
+    for (const tier of ["Low", "Medium", "High"]) {
+      if (new RegExp(`-\\s*\\[x\\]\\s*\\*\\*${tier}\\*\\*`, "i").test(body)) {
+        checkedTiers.push(tier);
+      }
+    }
+
+    if (checkedTiers.length === 0) {
       errors.push(
-        `PR body — declared Risk Tier "${declared}" is below required "${computedTier}" for changed paths`,
+        `PR body — select one Risk Tier checkbox (minimum required for changed paths: ${computedTier})`,
       );
+    } else {
+      const declared = checkedTiers.reduce((a, b) =>
+        TIER_ORDER[a] >= TIER_ORDER[b] ? a : b,
+      );
+      if (TIER_ORDER[declared] < TIER_ORDER[computedTier]) {
+        errors.push(
+          `PR body — declared Risk Tier "${declared}" is below required "${computedTier}" for changed paths`,
+        );
+      }
     }
   }
 }

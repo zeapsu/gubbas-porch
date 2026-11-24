@@ -13,7 +13,18 @@ updates:
     labels:
       - "dependencies"
       - "automated"
+    ignore:
+      # Stay on the Node 22 LTS type definitions (engines.node >=22, CI runs Node 22).
+      - dependency-name: "@types/node"
+        versions: [">=23.0.0"]
     groups:
+      # Listed first so it wins over dev-dependencies. No update-types filter: vite and vitest
+      # always bump together, majors included.
+      vite-vitest:
+        patterns:
+          - "vite"
+          - "vitest"
+          - "@vitest/*"
       dev-dependencies:
         dependency-type: "development"
         update-types:

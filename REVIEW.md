@@ -68,13 +68,13 @@ To prevent endless agent-author / agent-reviewer loops:
 
 ## 7. Risk Tiers & Approval Policy
 
-The **change** sets the tier, never the author.
+The **change** sets the tier, never the author. The only path to merge without the gates below is the narrow Dependabot carve-out in [Section 8](#8-ci-review-gate-contract) (green semver-minor/patch bumps of non-runtime dependencies and GitHub Actions); it changes who may merge, not the tier.
 
 | Tier | Changed paths / scope | Required gates |
 | --- | --- | --- |
 | **Low** | Docs (`README.md`, `DESIGN.md` prose, `docs/mockups/**`), Gubba dialogue lines, palette tweaks, additive tests. | Required CI + `review-gate` (`Important: 0`). |
 | **Medium** | Runtime modules (`src/**`), Blender scripts (`scripts/blender/**`), `assets/models.spec.json`, `assets/ramps.json`, `public/assets/**`. | Required CI + Fresh-context cross-model review against `REVIEW.md` (`Important: 0`, security pass clean) + `review-gate`. |
-| **High** | `.github/workflows/**`, `.github/scripts/**`, `REVIEW.md`, `AGENTS.md`, deployment/hosting config, security-sensitive changes, major dependency upgrades. | Required CI + Cross-model review (`Important: 0`) + **Explicit human approval**. Bot/agent approvals never satisfy human approval. New commits invalidate prior approvals. |
+| **High** | `.github/workflows/**`, `.github/scripts/**`, `REVIEW.md`, `AGENTS.md`, deployment/hosting config, security-sensitive changes, major dependency upgrades. | Required CI + Cross-model review (`Important: 0`) + **Explicit human approval**. Bot/agent approvals never satisfy human approval. New commits invalidate prior approvals. Sole exception: the Section 8 Dependabot carve-out for green minor/patch non-runtime bumps. |
 
 ## 8. CI Review Gate Contract
 
@@ -84,6 +84,21 @@ The `review-gate` job in [.github/workflows/ci.yml](./.github/workflows/ci.yml) 
 3. Computes the minimum required risk tier from the PR's changed files and fails if the PR under-declares its tier.
 4. Runs deterministic static security hygiene checks (forbids `eval`/`new Function`/`innerHTML`, checks secret patterns, checks workflow `permissions:` and `${{ github.event.* }}` interpolation).
 5. Medium and High risk changes additionally require a fresh-context, cross-model read-only review against this document prior to merge (logged in PR summary or review comments), with all `Important` findings resolved.
+
+**Dependabot PR-body exception.** A PR opened by `dependabot[bot]` whose changed files are all `package.json`, `package-lock.json`, or `.github/workflows/*.yml` / `.yaml` skips only the PR-body checks (items 2–3), because the bot cannot fill in the template. Governance (item 1), security hygiene (item 4), and the rest of CI still run on it. A Dependabot PR that touches any other path, or whose diff is empty or cannot be computed, gets no exception.
+
+**Dependabot auto-merge carve-out.** `.github/workflows/dependabot-auto.yml` runs after the `CI` workflow completes on such a PR and squash-merges it without the Section 7 cross-model review and human approval only when `.github/scripts/dependabot-auto-merge.mjs` confirms all of:
+- The PR is open, not a draft, targets `main` from this repository, was opened by `dependabot[bot]`, and its head is still the commit CI ran on.
+- Every commit is a GitHub-signed `dependabot[bot]` commit, and every commit on its own carries Dependabot update metadata listing only semver-minor or semver-patch updates.
+- No update is a runtime dependency: `three`, or anything in the `prod-dependencies` group.
+- All three CI jobs of the triggering CI run completed successfully on the head commit.
+- The commit, file, and job listings read from the GitHub API are complete (their counts match).
+
+The merge is immediate and pinned to the verified head commit (`gh pr merge --squash --match-head-commit`). GitHub's deferred auto-merge is never enabled, so a later commit on the PR (for example a major bump added to a `vite-vitest` PR) is only merged after its own CI run and a fresh evaluation.
+
+The merge uses `GITHUB_TOKEN`, and GitHub starts no workflows for events caused by that token: an auto-merged commit gets no post-merge `push` CI run and no `Deploy to GitHub Pages` run. That is acceptable for dev-dependency and GitHub Actions bumps, which change no shipped runtime code; the site keeps serving the previous build until the next human push to `main`. It is not acceptable for the runtime bundle, which is why `three` (0.x, where minor releases carry breaking changes) is excluded and goes through human review and the normal CI and deploy path.
+
+Major upgrades, runtime dependency bumps, and anything the script cannot verify are never auto-merged and keep the High-tier gates in Section 7 (cross-model review and explicit human approval).
 
 ## 9. Feedback Loop (Incidents Become Evals)
 

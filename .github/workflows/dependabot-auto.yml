@@ -1,0 +1,48 @@
+name: Dependabot Auto-Merge
+
+# Squash-merges Dependabot minor/patch PRs after the CI workflow succeeds on them.
+# Every merge condition is enforced by .github/scripts/dependabot-auto-merge.mjs (see REVIEW.md §8).
+#
+# The merge is made with secrets.GITHUB_TOKEN, and GitHub does not start workflows for events
+# caused by that token: the squash commit on `main` gets NO post-merge `push` CI run and so NO
+# "Deploy to GitHub Pages" run. That is acceptable only for dev-dependency and GitHub Actions
+# minor/patch bumps, which change no shipped runtime code; the site keeps serving the previous
+# build until the next human push to `main`. Runtime dependency bumps (`three`, the
+# `prod-dependencies` group) need a deploy, so the script never merges them: they stay open for
+# human review and the normal CI -> deploy path.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  auto-merge:
+    name: Auto-merge green minor/patch Dependabot PRs
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # merge the PR
+      pull-requests: write # merge the PR
+      actions: read # list the jobs of the triggering CI run
+    steps:
+      # workflow_run always runs in the default-branch context, so this checks out trusted `main`.
+      # Never check out the PR ref here: this job holds a write token.
+      - name: Checkout trusted default branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify and merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          # The script reads CI results only from this run's jobs, not from any check on the commit.
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: node .github/scripts/dependabot-auto-merge.mjs

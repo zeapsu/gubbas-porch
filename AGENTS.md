@@ -52,7 +52,7 @@ Every change must pass local verification AND a fresh-context review before open
    - Respect the convergence rules in `REVIEW.md`: round cap 3, diff-only re-reviews after round 1, flag classes once.
 4. **PR hygiene**:
    - Fill out `.github/pull_request_template.md` completely (`Summary`, `Risk Tier`, `Testing`, `How to Revert`).
-   - High-risk paths (`.github/workflows/**`, `.github/scripts/**`, `REVIEW.md`, `AGENTS.md`, deploy/security configs) always require explicit human approval.
+   - High-risk paths (`.github/workflows/**`, `.github/scripts/**`, `REVIEW.md`, `AGENTS.md`, deploy/security configs) require explicit human approval. Sole exception: the narrow Dependabot carve-out in [REVIEW.md](./REVIEW.md) §8, under which green semver-minor/patch Dependabot PRs for non-runtime dependencies or GitHub Actions that touch only `package.json`, `package-lock.json`, or `.github/workflows/*.yml` / `.yaml` are merged by `.github/workflows/dependabot-auto.yml`. Runtime (`three`) and major bumps still need human approval.
    - Keep commits small, focused, and easy to revert, with clear subject + body explaining what changed and why.
 
 ## 4. Key Files Map
