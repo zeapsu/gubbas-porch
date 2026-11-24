@@ -477,7 +477,7 @@ describe("garden state", () => {
     const encoded = encodeGarden(garden);
     const data = JSON.parse(encoded);
     const malformed = fc.oneof(
-      fc.fullUnicodeString(),
+      fc.string({ unit: "binary" }),
       fc.integer({ min: 0, max: encoded.length - 1 }).map(n => encoded.slice(0, n)),
       fc.integer({ min: 0, max: data.sand.length - 4 }).map(n => JSON.stringify({ ...data, sand: data.sand.slice(0, n) })),
       fc.constantFrom("null", "[]", "undefined", JSON.stringify({ ...data, v: 2 }), "x".repeat(MAX_GARDEN_BYTES + 1)),
